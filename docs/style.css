@@ -1,0 +1,268 @@
+/* TabIt 2.03 tribute — Windows 9x chrome */
+
+:root {
+  --face: #c0c0c0;
+  --face-light: #ffffff;
+  --face-shadow: #808080;
+  --face-dark: #404040;
+  --title-active: linear-gradient(90deg, #000080, #1084d0);
+  --hilite: #000080;
+  --hilite-text: #ffffff;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  height: 100%;
+  margin: 0;
+  background: #008080; /* classic teal desktop */
+  font-family: "MS Sans Serif", Tahoma, "Segoe UI", sans-serif;
+  font-size: 11px;
+  overflow: hidden;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+#appwindow {
+  position: absolute;
+  inset: 4px;
+  display: flex;
+  flex-direction: column;
+  background: var(--face);
+  border: 1px solid var(--face-dark);
+  box-shadow:
+    inset 1px 1px 0 var(--face-light),
+    inset -1px -1px 0 var(--face-shadow);
+  padding: 2px;
+}
+
+/* ---- title bar ---- */
+#titlebar {
+  display: flex;
+  align-items: center;
+  height: 18px;
+  background: var(--title-active);
+  color: #fff;
+  font-weight: bold;
+  padding: 1px 2px;
+  flex: none;
+}
+#titleicon {
+  width: 14px; height: 14px;
+  background: #000080;
+  color: #ffff00;
+  font: bold 11px "Courier New", monospace;
+  text-align: center;
+  line-height: 14px;
+  border: 1px solid #fff;
+  margin-right: 4px;
+  flex: none;
+}
+#titletext {
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+#titlebuttons { flex: none; }
+.titlebtn {
+  display: inline-block;
+  width: 16px; height: 14px;
+  margin-left: 2px;
+  background: var(--face);
+  color: #000;
+  text-align: center;
+  font: bold 9px Tahoma, sans-serif;
+  line-height: 13px;
+  box-shadow:
+    inset 1px 1px 0 var(--face-light),
+    inset -1px -1px 0 var(--face-dark),
+    inset 2px 2px 0 var(--face),
+    inset -2px -2px 0 var(--face-shadow);
+}
+
+/* ---- menu bar ---- */
+#menubar {
+  display: flex;
+  height: 19px;
+  background: var(--face);
+  padding: 1px 0;
+  flex: none;
+  position: relative;
+}
+.menutitle {
+  padding: 2px 7px 3px;
+  cursor: default;
+}
+.menutitle.open, .menutitle:hover.armed {
+  background: var(--hilite);
+  color: var(--hilite-text);
+}
+.menutitle u { text-decoration: underline; }
+
+.menupopup {
+  position: absolute;
+  min-width: 170px;
+  background: var(--face);
+  border: 1px solid var(--face-dark);
+  box-shadow:
+    inset 1px 1px 0 var(--face-light),
+    inset -1px -1px 0 var(--face-shadow),
+    2px 2px 0 rgba(0,0,0,.35);
+  padding: 2px;
+  z-index: 100;
+}
+.menuitem {
+  display: flex;
+  align-items: center;
+  padding: 3px 16px 3px 22px;
+  position: relative;
+  white-space: nowrap;
+  cursor: default;
+}
+.menuitem .shortcut {
+  margin-left: auto;
+  padding-left: 24px;
+}
+.menuitem:hover:not(.disabled) {
+  background: var(--hilite);
+  color: var(--hilite-text);
+}
+.menuitem.disabled { color: var(--face-shadow); text-shadow: 1px 1px 0 var(--face-light); }
+.menuitem.checked::before {
+  content: "\2713";
+  position: absolute;
+  left: 7px;
+}
+.menusep {
+  height: 0;
+  border-top: 1px solid var(--face-shadow);
+  border-bottom: 1px solid var(--face-light);
+  margin: 3px 1px;
+}
+
+/* ---- editor ---- */
+#editorpane {
+  flex: 1;
+  overflow: auto;
+  background: #ffffff;
+  border: 1px solid;
+  border-color: var(--face-shadow) var(--face-light) var(--face-light) var(--face-shadow);
+  box-shadow: inset 1px 1px 0 var(--face-dark);
+  margin: 1px;
+  position: relative;
+}
+#tabcanvas { display: block; }
+
+/* ---- status bar ---- */
+#statusbar {
+  display: flex;
+  gap: 2px;
+  height: 20px;
+  padding-top: 2px;
+  flex: none;
+}
+.statuspanel {
+  display: inline-block;
+  padding: 2px 6px;
+  background: var(--face);
+  box-shadow:
+    inset 1px 1px 0 var(--face-shadow),
+    inset -1px -1px 0 var(--face-light);
+  white-space: nowrap;
+  overflow: hidden;
+  min-width: 70px;
+}
+.statuswide { flex: 1; }
+
+/* ---- dialogs ---- */
+#dialoglayer {
+  position: absolute;
+  inset: 0;
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.dialog {
+  background: var(--face);
+  border: 1px solid var(--face-dark);
+  box-shadow:
+    inset 1px 1px 0 var(--face-light),
+    inset -1px -1px 0 var(--face-shadow),
+    3px 3px 0 rgba(0,0,0,.35);
+  padding: 2px;
+  min-width: 280px;
+  max-width: 460px;
+}
+.dialog .dlgtitle {
+  background: var(--title-active);
+  color: #fff;
+  font-weight: bold;
+  padding: 2px 4px;
+  height: 18px;
+  display: flex;
+  align-items: center;
+}
+.dialog .dlgtitle .dlgclose {
+  margin-left: auto;
+  width: 16px; height: 14px;
+  background: var(--face);
+  color: #000;
+  text-align: center;
+  font: bold 9px Tahoma, sans-serif;
+  line-height: 13px;
+  cursor: default;
+  box-shadow:
+    inset 1px 1px 0 var(--face-light),
+    inset -1px -1px 0 var(--face-dark);
+}
+.dialog .dlgbody { padding: 10px 12px; }
+.dialog .dlgbody label { display: block; margin: 6px 0 2px; }
+.dialog .dlgrow { display: flex; gap: 8px; align-items: center; margin: 4px 0; }
+.dialog .dlgbuttons {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  padding: 8px 12px 10px;
+}
+.dialog pre {
+  font: 12px "Courier New", monospace;
+  background: #fff;
+  border: 1px solid;
+  border-color: var(--face-shadow) var(--face-light) var(--face-light) var(--face-shadow);
+  padding: 6px;
+  max-height: 300px;
+  overflow: auto;
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+button, select, input[type=text], input[type=number] {
+  font-family: "MS Sans Serif", Tahoma, "Segoe UI", sans-serif;
+  font-size: 11px;
+}
+button {
+  min-width: 75px;
+  height: 23px;
+  background: var(--face);
+  border: 1px solid var(--face-dark);
+  box-shadow:
+    inset 1px 1px 0 var(--face-light),
+    inset -1px -1px 0 var(--face-shadow);
+  cursor: default;
+}
+button:active {
+  box-shadow:
+    inset 1px 1px 0 var(--face-shadow),
+    inset -1px -1px 0 var(--face-light);
+}
+select, input[type=text], input[type=number] {
+  background: #fff;
+  border: 1px solid;
+  border-color: var(--face-shadow) var(--face-light) var(--face-light) var(--face-shadow);
+  box-shadow: inset 1px 1px 0 var(--face-dark);
+  padding: 2px 3px;
+  height: 21px;
+}
+input[type=range] { width: 120px; }
