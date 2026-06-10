@@ -1,8 +1,9 @@
 name: Deploy to GitHub Pages
 
 on:
-  push:
-    branches: [main]
+  # Manual deployment, for repositories using "GitHub Actions" as the
+  # Pages source. With "Deploy from a branch" publishing, this workflow
+  # is not needed — GitHub builds and deploys automatically on push.
   workflow_dispatch:
 
 permissions:

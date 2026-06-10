@@ -22,13 +22,13 @@ python3 -m http.server -d docs
 
 ### GitHub Pages
 
-Two options:
+The site publishes from the `main` branch (*Deploy from a branch* in the
+repository's Pages settings). Either the `/ (root)` or `/docs` folder
+works — the root `index.html` redirects into `docs/`.
 
-1. **Deploy from a branch** — in the repository settings, under
-   *Pages*, choose *Deploy from a branch*, branch `main`, folder `/docs`.
-2. **GitHub Actions** — choose *GitHub Actions* as the source; the
-   included workflow (`.github/workflows/pages.yml`) deploys `docs/` on
-   every push to `main`.
+Alternatively, with *GitHub Actions* as the Pages source, the included
+workflow (`.github/workflows/pages.yml`) can be run manually to deploy
+just the `docs/` folder.
 
 ## Using the editor
 
