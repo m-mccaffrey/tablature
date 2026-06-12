@@ -1,6 +1,7 @@
 /* TabIt Web — an unofficial tribute to TabIt 2.03 by GTAB Software.
-   Instrument names, tuning presets, and UI wording recovered from a
-   Ghidra analysis of the original WinTabIt executable. */
+   Instrument names, tuning presets, file format and UI wording recovered
+   from a Ghidra analysis of the original WinTabIt executable and from the
+   public .tbt file format documentation. */
 "use strict";
 
 /* ================= constants ================= */
@@ -34,9 +35,9 @@ const GM_INSTRUMENTS = [
 
 const DRUM_KITS = ["Standard","Power","Electronic","TR-808","Brush","Orchestra"];
 
-// Tuning presets recovered from the binary's preset tuning list.
+// Built-in tuning presets recovered from the binary's preset tuning list.
 // Pitches are MIDI note numbers, top (highest) display string first.
-const TUNING_PRESETS = {
+const BUILTIN_TUNINGS = {
   "(Standard)":   [64,59,55,50,45,40],
   "Dropped D":    [64,59,55,50,45,38],
   "D Tuning":     [62,57,53,48,43,38],
@@ -48,34 +49,56 @@ const TUNING_PRESETS = {
   "Open E":       [64,59,56,52,47,40],
   "Bass (Standard)": [43,38,33,28]
 };
+let userTunings = {};
+const allTunings = () => ({ ...BUILTIN_TUNINGS, ...userTunings });
 
 const NOTE_NAMES = ["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"];
-const noteName = m => NOTE_NAMES[m % 12] + (Math.floor(m / 12) - 1);
+const noteName = m => NOTE_NAMES[((m % 12) + 12) % 12] + (Math.floor(m / 12) - 1);
 
+// Note effects, displayed with the same characters the original uses.
 const EFFECTS = {
   "h": "Hammer-on", "p": "Pull-off", "/": "Slide Up", "\\": "Slide Down",
-  "b": "Bend", "r": "Release", "~": "Vibrato", "t": "Tapping", "x": "Dead Note"
+  "b": "Bend", "^": "Bend Up", "r": "Release", "~": "Vibrato",
+  "t": "Tapping", "s": "Slap", "w": "Whammy", "(": "Soft",
+  "<": "Harmonic", "{": "Tremolo"
 };
 
-const MAX_FRET = 28;
+// Track effect change types (same ids as the .tbt format).
+const TFX = { STROKE_DOWN: 1, STROKE_UP: 2, TEMPO: 3, INSTRUMENT: 4,
+              VOLUME: 5, PAN: 6, CHORUS: 7, REVERB: 8, MODULATION: 9, PITCH_BEND: 10 };
+const TFX_NAMES = { 1:"Stroke Down", 2:"Stroke Up", 3:"Tempo Change", 4:"Instrument Change",
+                    5:"Volume Change", 6:"Pan Change", 7:"Chorus Change", 8:"Reverb Change",
+                    9:"Modulation Change", 10:"Pitch Bend Change" };
+
+const MAX_FRET = 99;
 
 /* ================= song model ================= */
+
+function makeBar(spaces) {
+  return { spaces: spaces || song.spacesPerBar || 16,
+           open: false, close: false, double: false, repeat: 0 };
+}
 
 function makeTrack(name, instrument, tuning) {
   return {
     name, instrument, isDrum: false, drumKit: 0,
-    tuning: tuning.slice(), volume: 104, pan: 64,
-    // spaces[col] is null or an array per string of null | {f: fret, fx: char|null}
-    spaces: []
+    cutAnyString: false,
+    tuning: tuning.slice(), volume: 104, pan: 64, reverb: 0, chorus: 0,
+    modulation: 0, pitchBend: 0,
+    played: true,
+    spaces: [], fx: {}, topText: {}, botText: {}, alt: null
   };
 }
 
 function blankSong() {
-  return {
-    title: "Untitled", artist: "", comments: "",
+  const s = {
+    title: "Untitled", artist: "", album: "", transcribedBy: "", comments: "",
     tempo: 120, spacesPerBar: 16,
-    tracks: [makeTrack("Track 1", 27, TUNING_PRESETS["(Standard)"])]
+    barLines: [], tracks: []
   };
+  for (let i = 0; i < 4; i++) s.barLines.push({ spaces: 16, open: false, close: false, double: false, repeat: 0 });
+  s.tracks.push(makeTrack("Track 1", 27, BUILTIN_TUNINGS["(Standard)"]));
+  return s;
 }
 
 function demoSong() {
@@ -83,19 +106,20 @@ function demoSong() {
   s.title = "Demo";
   s.comments = "Demo song for TabIt Web.";
   s.tempo = 100;
+  s.barLines[0].open = true;
+  s.barLines[3].close = true;
+  s.barLines[3].repeat = 2;
   const g = s.tracks[0];
   g.name = "Guitar";
-  g.instrument = 25; // Acoustic Guitar (steel)
-  const b = makeTrack("Bass", 33, TUNING_PRESETS["Bass (Standard)"]); // Electric Bass (finger)
+  g.instrument = 25;
+  const b = makeTrack("Bass", 33, BUILTIN_TUNINGS["Bass (Standard)"]);
   b.volume = 96;
   s.tracks.push(b);
-
   const put = (tr, col, str, fret, fx) => {
     while (tr.spaces.length <= col) tr.spaces.push(null);
     if (!tr.spaces[col]) tr.spaces[col] = new Array(tr.tuning.length).fill(null);
     tr.spaces[col][str] = { f: fret, fx: fx || null };
   };
-  // Em - C - G - D arpeggios, 16 spaces per bar
   const gp = [
     [0,5,0],[2,4,2],[4,3,2],[6,2,0],[8,1,0],[10,2,0],[12,3,2],[14,4,2],
     [16,4,3],[18,3,2],[20,2,0],[22,1,1],[24,0,0],[26,1,1],[28,2,0],[30,3,2],
@@ -110,32 +134,105 @@ function demoSong() {
     [48,2,5],[52,2,5],[56,2,5],[60,2,5,"\\"]
   ];
   for (const [c, st, f, fx] of bp) put(b, c, st, f, fx);
-  for (const tr of s.tracks) while (tr.spaces.length < 64) tr.spaces.push(null);
   return s;
 }
 
 /* ================= application state ================= */
 
 let song = demoSong();
-let fileName = null;          // null = Untitled
+let fileName = null;
 let curTrack = 0;
-let cur = { col: 0, str: 0 }; // cursor
-let selAnchor = null;         // selection anchor column, or null
+let cur = { col: 0, str: 0 };
+let selAnchor = null;
 let clipboard = null;
 let undoStack = [], redoStack = [];
 let pendingDigit = null, pendingTimer = null;
 let caretOn = true;
 let playing = false, playCol = -1, playStartCol = 0;
+let geomVersion = 0;
+const geomCache = new Map();
+
 let opts = { caretBlink: true, barNumbers: true, followPlayback: true,
-             rewindAfterStop: true, metronome: false, loop: false };
+             rewindAfterStop: true, metronome: false, metroVolume: 80,
+             metroAccent: true, loop: false, fontSize: "Medium" };
+
+let COLORS = defaultColors();
+function defaultColors() {
+  return { bg: "#ffffff", text: "#000000", line: "#000000", barnum: "#808080",
+           cursor: "#000080", cursorText: "#ffffff", sel: "#b0c4ff",
+           play: "#9090d0", fxMark: "#800000" };
+}
+
+const FONT_SIZES = { Small: [11, 14, 11, 9], Medium: [13, 16, 13, 10], Large: [16, 20, 16, 12] };
+let CW = 13, CH = 16, FPX = 13, FSPX = 10;
+function applyFontSize() {
+  const [cw, ch, f, fs] = FONT_SIZES[opts.fontSize] || FONT_SIZES.Medium;
+  CW = cw; CH = ch; FPX = f; FSPX = fs;
+}
 
 const track = () => song.tracks[curTrack];
 const nStrings = () => track().tuning.length;
-const songCols = () => Math.max(...song.tracks.map(t => t.spaces.length), song.spacesPerBar);
-const nBars = () => Math.ceil(songCols() / song.spacesPerBar);
+const bars = () => song.barLines;
+const plainTotal = () => bars().reduce((a, b) => a + b.spaces, 0);
 
-function ensureCols(tr, n) {
-  while (tr.spaces.length < n) tr.spaces.push(null);
+/* ---- per-track geometry (handles alternate time regions) ---- */
+
+const EPS = 1e-6;
+
+function trackGeom(tr) {
+  const c = geomCache.get(tr);
+  if (c && c.v === geomVersion) return c.g;
+  const bl = bars();
+  const pt = plainTotal();
+  const ratio = i => tr.alt && tr.alt[i] ? tr.alt[i][1] / tr.alt[i][0] : 1;
+  // plain width of each track space; track spaces fill the plain timeline
+  let cols;
+  if (!tr.alt) cols = pt;
+  else {
+    let cum = 0; cols = 0;
+    while (cum < pt - EPS) { cum += ratio(cols); cols++; }
+  }
+  cols = Math.max(cols, 1);
+  const plainStart = new Float64Array(cols + 1);
+  for (let i = 0; i < cols; i++) plainStart[i + 1] = plainStart[i] + ratio(i);
+  // bar ranges in track-space columns
+  const gBars = [];
+  let p = 0, col = 0;
+  for (const b of bl) {
+    const end = p + b.spaces;
+    const start = col;
+    while (col < cols && plainStart[col] < end - EPS) col++;
+    gBars.push({ start, cols: col - start, plain0: p, plain1: end });
+    p = end;
+  }
+  const g = { cols, plainStart, bars: gBars, plainTotal: pt };
+  geomCache.set(tr, { v: geomVersion, g });
+  return g;
+}
+
+function barOfCol(g, col) {
+  for (let k = g.bars.length - 1; k >= 0; k--)
+    if (col >= g.bars[k].start) return k;
+  return 0;
+}
+
+function invalidateGeom() { geomVersion++; }
+
+function normalizeBars() {
+  // make sure the bar grid covers every track's content
+  let need = 0;
+  for (const tr of song.tracks) {
+    if (!tr.alt) need = Math.max(need, tr.spaces.length);
+    else {
+      let cum = 0;
+      for (let i = 0; i < tr.spaces.length; i++)
+        cum += tr.alt[i] ? tr.alt[i][1] / tr.alt[i][0] : 1;
+      need = Math.max(need, Math.ceil(cum - EPS));
+    }
+  }
+  let changed = false;
+  while (plainTotal() < need) { bars().push(makeBar()); changed = true; }
+  if (changed) invalidateGeom();
 }
 
 function getCell(tr, col, str) {
@@ -144,7 +241,7 @@ function getCell(tr, col, str) {
 }
 
 function setCell(tr, col, str, val) {
-  ensureCols(tr, col + 1);
+  while (tr.spaces.length <= col) tr.spaces.push(null);
   if (!tr.spaces[col]) {
     if (val == null) return;
     tr.spaces[col] = new Array(tr.tuning.length).fill(null);
@@ -153,23 +250,75 @@ function setCell(tr, col, str, val) {
   if (val == null && tr.spaces[col].every(c => c == null)) tr.spaces[col] = null;
 }
 
+function shiftMaps(tr, atCol, delta) {
+  for (const key of ["fx", "topText", "botText"]) {
+    const src = tr[key] || {};
+    const dst = {};
+    for (const k of Object.keys(src)) {
+      const c = Number(k);
+      if (c < atCol) dst[c] = src[k];
+      else if (c + delta >= atCol) dst[c + delta] = src[k];
+    }
+    tr[key] = dst;
+  }
+  if (tr.alt) {
+    if (delta > 0) tr.alt.splice(atCol, 0, ...new Array(delta).fill(null));
+    else tr.alt.splice(atCol, -delta);
+  }
+}
+
+function trackInsertCols(tr, at, n) {
+  while (tr.spaces.length < at) tr.spaces.push(null);
+  shiftMaps(tr, at, n);
+  tr.spaces.splice(at, 0, ...new Array(n).fill(null));
+}
+
+function trackRemoveCols(tr, at, n) {
+  if (at < tr.spaces.length) tr.spaces.splice(at, Math.min(n, tr.spaces.length - at));
+  shiftMaps(tr, at, -n);
+}
+
+/* ================= persistence (the web equivalent of
+   Software\GTAB Software\WinTabIt) ================= */
+
+function savePrefs() {
+  try {
+    localStorage.setItem("WinTabIt-Config", JSON.stringify({
+      opts, colors: COLORS, userTunings,
+      schemes: JSON.parse(localStorage.getItem("WinTabIt-Schemes") || "{}")
+    }));
+  } catch (e) { /* private browsing */ }
+}
+
+function loadPrefs() {
+  try {
+    const p = JSON.parse(localStorage.getItem("WinTabIt-Config") || "null");
+    if (!p) return;
+    Object.assign(opts, p.opts || {});
+    Object.assign(COLORS, p.colors || {});
+    userTunings = p.userTunings || {};
+  } catch (e) { /* ignore */ }
+}
+
 /* ================= undo ================= */
 
+const stripPrivate = (k, v) => k.startsWith("_") ? undefined : v;
+
 function pushUndo() {
-  undoStack.push(JSON.stringify({ song, curTrack }));
+  undoStack.push(JSON.stringify({ song, curTrack }, stripPrivate));
   if (undoStack.length > 64) undoStack.shift();
   redoStack.length = 0;
 }
 
 function undo() {
   if (!undoStack.length) return;
-  redoStack.push(JSON.stringify({ song, curTrack }));
+  redoStack.push(JSON.stringify({ song, curTrack }, stripPrivate));
   restoreState(undoStack.pop());
 }
 
 function redo() {
   if (!redoStack.length) return;
-  undoStack.push(JSON.stringify({ song, curTrack }));
+  undoStack.push(JSON.stringify({ song, curTrack }, stripPrivate));
   restoreState(redoStack.pop());
 }
 
@@ -177,6 +326,7 @@ function restoreState(json) {
   const st = JSON.parse(json);
   song = st.song;
   curTrack = Math.min(st.curTrack, song.tracks.length - 1);
+  invalidateGeom();
   clampCursor();
   fullRedraw();
 }
@@ -187,56 +337,61 @@ const pane = document.getElementById("editorpane");
 const canvas = document.getElementById("tabcanvas");
 const ctx2d = canvas.getContext("2d");
 
-const CW = 13, CH = 16;          // character cell size
-const LEFT_CHARS = 3;            // tuning label + "|"
+const LEFT_CHARS = 3;
 const TOP_PAD = 8;
-const FONT = "13px 'Courier New', monospace";
-const FONT_SMALL = "10px 'Courier New', monospace";
+const font = () => FPX + "px 'Courier New', monospace";
+const fontSmall = () => FSPX + "px 'Courier New', monospace";
 
-const COL_BG = "#ffffff", COL_TEXT = "#000000", COL_LINE = "#000000",
-      COL_BARNUM = "#808080", COL_CUR = "#000080", COL_CUR_TEXT = "#ffffff",
-      COL_SEL = "#b0c4ff", COL_PLAY = "rgba(0,0,128,0.25)", COL_FX = "#000000";
-
-let layout = { barsPerRow: 1, rowH: 0 };
+let layout = { rowH: 0, barPos: [], rows: 1 };
 
 function computeLayout() {
-  const w = pane.clientWidth - 20;
-  const usable = Math.floor(w / CW) - LEFT_CHARS - 1;
-  layout.barsPerRow = Math.max(1, Math.floor(usable / (song.spacesPerBar + 1)));
+  applyFontSize();
+  const g = trackGeom(track());
+  const limit = Math.max(200, pane.clientWidth - 24);
   layout.rowH = (nStrings() + (opts.barNumbers ? 1 : 0) + 2) * CH;
+  layout.barPos = [];
+  let x = LEFT_CHARS * CW, row = 0;
+  for (let k = 0; k < g.bars.length; k++) {
+    const w = (g.bars[k].cols + 1) * CW;
+    if (x > LEFT_CHARS * CW && x + w + CW > limit) { row++; x = LEFT_CHARS * CW; }
+    layout.barPos.push({ row, x });
+    x += w;
+  }
+  layout.rows = row + 1;
 }
 
-// x of the bar-line cell that precedes bar `barInRow` of a row
-const barlineX = barInRow => (LEFT_CHARS + barInRow * (song.spacesPerBar + 1)) * CW;
-
-// top-left corner of the cell for (col, str)
 function colToXY(col, str) {
-  const spb = song.spacesPerBar;
-  const bar = Math.floor(col / spb);
-  const row = Math.floor(bar / layout.barsPerRow);
-  const barInRow = bar % layout.barsPerRow;
-  const x = barlineX(barInRow) + CW + (col % spb) * CW;
-  const y = TOP_PAD + row * layout.rowH + (opts.barNumbers ? CH : 0) + str * CH;
-  return { x, y, row };
+  const g = trackGeom(track());
+  const k = barOfCol(g, Math.min(col, g.cols - 1));
+  const bp = layout.barPos[k] || { row: 0, x: LEFT_CHARS * CW };
+  const x = bp.x + CW + (col - g.bars[k].start) * CW;
+  const y = TOP_PAD + bp.row * layout.rowH + (opts.barNumbers ? CH : 0) + str * CH;
+  return { x, y, row: bp.row, bar: k };
 }
 
 function xyToCol(px, py) {
-  const spb = song.spacesPerBar;
-  const row = Math.max(0, Math.floor((py - TOP_PAD) / layout.rowH));
+  const g = trackGeom(track());
+  const row = Math.max(0, Math.min(layout.rows - 1, Math.floor((py - TOP_PAD) / layout.rowH)));
   let str = Math.floor((py - TOP_PAD - row * layout.rowH - (opts.barNumbers ? CH : 0)) / CH);
   str = Math.max(0, Math.min(nStrings() - 1, str));
-  const cx = Math.floor(px / CW) - LEFT_CHARS;
-  const barInRow = Math.max(0, Math.min(layout.barsPerRow - 1, Math.floor(cx / (spb + 1))));
-  const inBar = Math.max(0, Math.min(spb - 1, cx - barInRow * (spb + 1) - 1));
-  const col = (row * layout.barsPerRow + barInRow) * spb + inBar;
-  return { col: Math.max(0, Math.min(col, songCols() - 1)), str };
+  let best = null;
+  for (let k = 0; k < g.bars.length; k++) {
+    const bp = layout.barPos[k];
+    if (bp.row !== row) continue;
+    if (best === null) best = k;
+    if (px >= bp.x) best = k;
+  }
+  if (best === null) return { col: 0, str };
+  const b = g.bars[best];
+  const inBar = Math.max(0, Math.min(b.cols - 1, Math.floor((px - layout.barPos[best].x) / CW) - 1));
+  return { col: Math.min(b.start + inBar, g.cols - 1), str };
 }
 
 function fullRedraw() {
+  normalizeBars();
   computeLayout();
-  const rows = Math.ceil(nBars() / layout.barsPerRow);
   const wantW = pane.clientWidth - 4;
-  const wantH = Math.max(pane.clientHeight - 4, TOP_PAD * 2 + rows * layout.rowH);
+  const wantH = Math.max(pane.clientHeight - 4, TOP_PAD * 2 + layout.rows * layout.rowH);
   const dpr = window.devicePixelRatio || 1;
   canvas.width = wantW * dpr;
   canvas.height = wantH * dpr;
@@ -248,103 +403,185 @@ function fullRedraw() {
   updateTitle();
 }
 
+function fxLabel(fx) {
+  switch (fx.t) {
+    case TFX.STROKE_DOWN: return "↓";
+    case TFX.STROKE_UP: return "↑";
+    case TFX.TEMPO: return "T" + fx.v;
+    case TFX.INSTRUMENT: return "I" + ((fx.v & 0x7f) + 1);
+    case TFX.VOLUME: return "V" + fx.v;
+    case TFX.PAN: return "P" + fx.v;
+    case TFX.CHORUS: return "C" + fx.v;
+    case TFX.REVERB: return "R" + fx.v;
+    case TFX.MODULATION: return "M" + fx.v;
+    case TFX.PITCH_BEND: return "B" + fx.v;
+  }
+  return "?";
+}
+
 function drawCellText(cell, x, yTop, fg) {
   const cy = yTop + CH / 2;
   ctx2d.fillStyle = fg;
-  const txt = cell.fx === "x" ? "x" : String(cell.f);
-  ctx2d.font = txt.length > 1 ? FONT_SMALL : FONT;
+  const txt = cell.fx === "x" ? "x" : cell.fx === "*" ? "*" : String(cell.f);
+  ctx2d.font = txt.length > 1 ? fontSmall() : font();
   ctx2d.fillText(txt, x + CW / 2, cy);
-  if (cell.fx && cell.fx !== "x") {
-    ctx2d.font = FONT_SMALL;
-    ctx2d.fillText(cell.fx, x + CW - 2, cy - 6);
+  if (cell.fx && cell.fx !== "x" && cell.fx !== "*") {
+    ctx2d.font = fontSmall();
+    ctx2d.fillText(cell.fx, x + CW - 2, cy - CH / 2 + 2);
   }
-  ctx2d.font = FONT;
+  ctx2d.font = font();
+}
+
+function drawBarlineGlyph(bx, top, bot, prevClose, prevRepeat, curOpen, curDouble) {
+  const x = Math.round(bx + CW / 2) + 0.5;
+  ctx2d.strokeStyle = COLORS.line;
+  ctx2d.beginPath();
+  if (prevClose || curOpen) {
+    ctx2d.lineWidth = 2.5;
+    ctx2d.moveTo(x, top); ctx2d.lineTo(x, bot);
+    ctx2d.stroke();
+    ctx2d.lineWidth = 1;
+    ctx2d.beginPath();
+    if (prevClose) { ctx2d.moveTo(x - 3.5, top); ctx2d.lineTo(x - 3.5, bot); }
+    if (curOpen) { ctx2d.moveTo(x + 3.5, top); ctx2d.lineTo(x + 3.5, bot); }
+    ctx2d.stroke();
+    ctx2d.fillStyle = COLORS.line;
+    const dy = (bot - top) / 3;
+    if (prevClose) {
+      ctx2d.fillRect(x - 7, top + dy - 1.5, 3, 3);
+      ctx2d.fillRect(x - 7, top + 2 * dy - 1.5, 3, 3);
+      if (prevRepeat > 2) {
+        ctx2d.font = fontSmall();
+        ctx2d.textAlign = "right";
+        ctx2d.fillText(prevRepeat + "x", x - 2, top - 6);
+        ctx2d.textAlign = "center";
+        ctx2d.font = font();
+      }
+    }
+    if (curOpen) {
+      ctx2d.fillRect(x + 5, top + dy - 1.5, 3, 3);
+      ctx2d.fillRect(x + 5, top + 2 * dy - 1.5, 3, 3);
+    }
+  } else if (curDouble) {
+    ctx2d.lineWidth = 1;
+    ctx2d.moveTo(x - 1.5, top); ctx2d.lineTo(x - 1.5, bot);
+    ctx2d.moveTo(x + 1.5, top); ctx2d.lineTo(x + 1.5, bot);
+    ctx2d.stroke();
+  } else {
+    ctx2d.lineWidth = 1;
+    ctx2d.moveTo(x, top); ctx2d.lineTo(x, bot);
+    ctx2d.stroke();
+  }
+  ctx2d.lineWidth = 1;
 }
 
 function draw() {
-  const tr = track(), spb = song.spacesPerBar, ns = nStrings();
-  const cols = songCols(), bars = nBars();
-  ctx2d.fillStyle = COL_BG;
+  const tr = track(), ns = nStrings();
+  const g = trackGeom(tr);
+  const bl = bars();
+  ctx2d.fillStyle = COLORS.bg;
   ctx2d.fillRect(0, 0, canvas.width, canvas.height);
-  ctx2d.font = FONT;
+  ctx2d.font = font();
   ctx2d.textBaseline = "middle";
   ctx2d.textAlign = "center";
   ctx2d.lineWidth = 1;
 
-  // selection
   const sel = selection();
   if (sel) {
-    ctx2d.fillStyle = COL_SEL;
-    for (let c = sel[0]; c <= sel[1]; c++) {
+    ctx2d.fillStyle = COLORS.sel;
+    for (let c = sel[0]; c <= sel[1] && c < g.cols; c++) {
       const p = colToXY(c, 0);
       ctx2d.fillRect(p.x, p.y, CW, ns * CH);
     }
   }
-
-  // playhead
-  if (playing && playCol >= 0 && playCol < cols) {
+  if (playing && playCol >= 0 && playCol < g.cols) {
     const pp = colToXY(playCol, 0);
-    ctx2d.fillStyle = COL_PLAY;
+    ctx2d.fillStyle = COLORS.play;
+    ctx2d.globalAlpha = 0.4;
     ctx2d.fillRect(pp.x, pp.y, CW, ns * CH);
+    ctx2d.globalAlpha = 1;
   }
 
-  for (let bar = 0; bar < bars; bar++) {
-    const startCol = bar * spb;
-    const barInRow = bar % layout.barsPerRow;
-    const p0 = colToXY(startCol, 0); // top-left of first space cell
-    const bx = barlineX(barInRow);   // bar-line cell to the left of it
-    const lineTop = p0.y + CH / 2;   // center of string 0
-    const lineBot = p0.y + (ns - 1) * CH + CH / 2;
+  for (let k = 0; k < g.bars.length; k++) {
+    const b = g.bars[k];
+    const bp = layout.barPos[k];
+    const yTop = TOP_PAD + bp.row * layout.rowH + (opts.barNumbers ? CH : 0);
+    const lineTop = yTop + CH / 2;
+    const lineBot = yTop + (ns - 1) * CH + CH / 2;
+    const wpx = (b.cols + 1) * CW;
 
-    // bar number above the first space of the bar
     if (opts.barNumbers) {
-      ctx2d.fillStyle = COL_BARNUM;
+      ctx2d.fillStyle = COLORS.barnum;
       ctx2d.textAlign = "left";
-      ctx2d.fillText(String(bar + 1), p0.x, p0.y - CH / 2);
+      ctx2d.fillText(String(k + 1), bp.x + CW, yTop - CH / 2);
       ctx2d.textAlign = "center";
     }
-    // horizontal string lines (covering the bar-line cell + all spaces)
-    ctx2d.strokeStyle = COL_LINE;
+    ctx2d.strokeStyle = COLORS.line;
     ctx2d.beginPath();
     for (let s = 0; s < ns; s++) {
-      const y = Math.round(p0.y + s * CH + CH / 2) + 0.5;
-      ctx2d.moveTo(bx, y);
-      ctx2d.lineTo(bx + (spb + 1) * CW, y);
-    }
-    // vertical bar lines (start of bar; end too for the last bar in the row)
-    ctx2d.moveTo(Math.round(bx + CW / 2) + 0.5, lineTop);
-    ctx2d.lineTo(Math.round(bx + CW / 2) + 0.5, lineBot);
-    if (barInRow === layout.barsPerRow - 1 || bar === bars - 1) {
-      const ex = Math.round(bx + (spb + 1) * CW + CW / 2) + 0.5;
-      ctx2d.moveTo(ex, lineTop);
-      ctx2d.lineTo(ex, lineBot);
+      const y = Math.round(yTop + s * CH + CH / 2) + 0.5;
+      ctx2d.moveTo(bp.x, y);
+      ctx2d.lineTo(bp.x + wpx, y);
     }
     ctx2d.stroke();
-    // tuning labels at the start of each staff row
-    if (barInRow === 0) {
-      ctx2d.fillStyle = COL_TEXT;
+
+    drawBarlineGlyph(bp.x, lineTop, lineBot,
+      k > 0 && bl[k - 1].close, k > 0 ? bl[k - 1].repeat : 0,
+      bl[k].open, bl[k].double);
+    const isRowEnd = k === g.bars.length - 1 || layout.barPos[k + 1].row !== bp.row;
+    if (isRowEnd)
+      drawBarlineGlyph(bp.x + wpx, lineTop, lineBot, bl[k].close, bl[k].repeat, false, false);
+
+    // tuning labels at row start
+    if (k === 0 || layout.barPos[k - 1].row !== bp.row) {
+      ctx2d.fillStyle = COLORS.text;
       ctx2d.textAlign = "right";
       for (let s = 0; s < ns; s++) {
-        let label = NOTE_NAMES[tr.tuning[s] % 12];
-        if (s === 0) label = label.toLowerCase();
-        ctx2d.fillText(tr.isDrum ? "D" : label, bx - 3, p0.y + s * CH + CH / 2);
+        let label = tr.isDrum ? "D" : NOTE_NAMES[((tr.tuning[s] % 12) + 12) % 12];
+        if (s === 0 && !tr.isDrum) label = label.toLowerCase();
+        ctx2d.fillText(label, bp.x - 3, yTop + s * CH + CH / 2);
       }
       ctx2d.textAlign = "center";
     }
-    // notes
-    for (let c = startCol; c < Math.min(startCol + spb, cols); c++) {
+
+    // contents of this bar
+    for (let c = b.start; c < b.start + b.cols; c++) {
+      const x = bp.x + CW + (c - b.start) * CW;
+      // track effect / alt-region / text markers above the staff
+      if (opts.barNumbers) {
+        const fx = tr.fx && tr.fx[c];
+        ctx2d.font = fontSmall();
+        if (fx) {
+          ctx2d.fillStyle = COLORS.fxMark;
+          ctx2d.fillText(fxLabel(fx), x + CW / 2, yTop - CH / 2 + 4);
+        } else if (tr.alt && tr.alt[c] &&
+                   (c === 0 || !tr.alt[c - 1] || tr.alt[c - 1][0] !== tr.alt[c][0] ||
+                    tr.alt[c - 1][1] !== tr.alt[c][1])) {
+          ctx2d.fillStyle = "#006000";
+          ctx2d.fillText(tr.alt[c][0] + ":" + tr.alt[c][1], x + CW / 2, yTop - CH / 2 + 4);
+        } else if (tr.topText && tr.topText[c]) {
+          ctx2d.fillStyle = COLORS.text;
+          ctx2d.fillText(tr.topText[c], x + CW / 2, yTop - CH / 2 + 4);
+        }
+        ctx2d.font = font();
+      }
+      if (tr.botText && tr.botText[c]) {
+        ctx2d.font = fontSmall();
+        ctx2d.fillStyle = COLORS.text;
+        ctx2d.fillText(tr.botText[c], x + CW / 2, yTop + ns * CH + 2);
+        ctx2d.font = font();
+      }
       const sp = tr.spaces[c];
       if (!sp) continue;
+      const inSel = sel && c >= sel[0] && c <= sel[1];
+      const onPlay = playing && c === playCol;
       for (let s = 0; s < ns; s++) {
         const cell = sp[s];
         if (!cell) continue;
-        const p = colToXY(c, s);
-        const inSel = sel && c >= sel[0] && c <= sel[1];
-        const onPlay = playing && c === playCol;
-        // blank out the string line behind the number
-        ctx2d.fillStyle = inSel ? COL_SEL : COL_BG;
-        if (!onPlay) ctx2d.fillRect(p.x, p.y + 1, CW, CH - 2);
-        drawCellText(cell, p.x, p.y, COL_TEXT);
+        const y = yTop + s * CH;
+        ctx2d.fillStyle = inSel ? COLORS.sel : COLORS.bg;
+        if (!onPlay) ctx2d.fillRect(x, y + 1, CW, CH - 2);
+        drawCellText(cell, x, y, COLORS.text);
       }
     }
   }
@@ -352,12 +589,12 @@ function draw() {
   // cursor
   if (!playing && (caretOn || !opts.caretBlink)) {
     const p = colToXY(cur.col, cur.str);
-    ctx2d.fillStyle = COL_CUR;
+    ctx2d.fillStyle = COLORS.cursor;
     ctx2d.fillRect(p.x, p.y + 1, CW, CH - 2);
     const cell = getCell(track(), cur.col, cur.str);
-    if (cell) drawCellText(cell, p.x, p.y, COL_CUR_TEXT);
+    if (cell) drawCellText(cell, p.x, p.y, COLORS.cursorText);
     else {
-      ctx2d.fillStyle = COL_CUR_TEXT;
+      ctx2d.fillStyle = COLORS.cursorText;
       ctx2d.fillText("-", p.x + CW / 2, p.y + CH / 2);
     }
   }
@@ -370,7 +607,7 @@ function selection() {
 
 function ensureCursorVisible() {
   const p = colToXY(cur.col, cur.str);
-  const top = p.y - CH * 2, bot = p.y + CH * 2;
+  const top = p.y - CH * 2, bot = p.y + CH * 3;
   if (top < pane.scrollTop) pane.scrollTop = Math.max(0, top);
   else if (bot > pane.scrollTop + pane.clientHeight) pane.scrollTop = bot - pane.clientHeight;
 }
@@ -378,19 +615,19 @@ function ensureCursorVisible() {
 /* ================= status / title ================= */
 
 function updateStatus() {
+  const g = trackGeom(track());
   document.getElementById("st-track").textContent =
-    " Track: " + (curTrack + 1) + " (" + track().name + ")";
+    " Track: " + (curTrack + 1) + " (" + track().name + ")" + (track().played ? "" : " [muted]");
   document.getElementById("st-bar").textContent =
-    " Bar: " + (Math.floor(cur.col / song.spacesPerBar) + 1);
+    " Bar: " + (barOfCol(g, cur.col) + 1);
   const sel = selection();
-  // selection wording matches the original binary
   document.getElementById("st-mode").textContent = playing ? "Playing..."
     : sel
     ? (sel[1] - sel[0] + 1) === 1 ? "1 space is selected."
       : (sel[1] - sel[0] + 1) + " spaces are selected."
     : "";
   document.getElementById("st-hint").textContent =
-    "Type fret numbers; h p / \\ b r ~ t x for effects; F5 play, F6 from cursor, F8 stop";
+    "Frets: 0-9 | Effects: h p / \\ b ^ r ~ t s w ( < { | x dead, * stop, u/d stroke | F5 play, F6 cursor, F8 stop";
 }
 
 function updateTitle() {
@@ -402,22 +639,25 @@ function updateTitle() {
 /* ================= cursor / editing ================= */
 
 function clampCursor() {
+  const g = trackGeom(track());
   cur.str = Math.max(0, Math.min(nStrings() - 1, cur.str));
-  cur.col = Math.max(0, Math.min(songCols() - 1, cur.col));
+  cur.col = Math.max(0, Math.min(g.cols - 1, cur.col));
 }
 
 function moveCursor(dc, ds, extend) {
   if (extend) { if (selAnchor == null) selAnchor = cur.col; }
   else selAnchor = null;
+  const g = trackGeom(track());
+  if (dc > 0 && cur.col + dc > g.cols - 1) {
+    pushUndo();
+    bars().push(makeBar());
+    invalidateGeom();
+  }
   cur.col += dc;
   cur.str += ds;
-  if (cur.col >= songCols() && dc > 0) {
-    // grow the song by a bar when stepping past the end, like the original
-    pushUndo();
-    ensureCols(track(), songCols() + song.spacesPerBar);
-  }
   clampCursor();
   flushPendingDigit();
+  computeLayout();
   ensureCursorVisible();
   fullRedraw();
 }
@@ -432,9 +672,10 @@ function typeDigit(d) {
   if (pendingDigit != null) {
     const v = pendingDigit * 10 + d;
     flushPendingDigit();
-    if (v <= MAX_FRET) {
+    if (v <= (tr.isDrum ? MAX_FRET : 28)) {
       const cell = getCell(tr, cur.col, cur.str);
       setCell(tr, cur.col, cur.str, { f: v, fx: cell ? cell.fx : null });
+      if (tr.isDrum && v <= 9) { pendingDigit = v; pendingTimer = setTimeout(() => { pendingDigit = null; }, 700); }
       fullRedraw();
       previewNote(tr, cur.col, cur.str);
       return;
@@ -442,8 +683,9 @@ function typeDigit(d) {
   }
   pushUndo();
   const cell = getCell(tr, cur.col, cur.str);
-  setCell(tr, cur.col, cur.str, { f: d, fx: cell && cell.fx !== "x" ? cell.fx : null });
-  if (d >= 1 && d <= 2) {
+  const oldFx = cell && cell.fx !== "x" && cell.fx !== "*" ? cell.fx : null;
+  setCell(tr, cur.col, cur.str, { f: d, fx: oldFx });
+  if (d >= 1 && (d <= 2 || tr.isDrum)) {
     pendingDigit = d;
     pendingTimer = setTimeout(() => { pendingDigit = null; }, 700);
   }
@@ -453,18 +695,57 @@ function typeDigit(d) {
 
 function typeEffect(ch) {
   const tr = track();
-  if (ch === "x") {
+  if (ch === "x" || ch === "*") {
     pushUndo();
     const cell = getCell(tr, cur.col, cur.str);
-    if (cell && cell.fx === "x") setCell(tr, cur.col, cur.str, null);
-    else setCell(tr, cur.col, cur.str, { f: 0, fx: "x" });
+    if (cell && cell.fx === ch) setCell(tr, cur.col, cur.str, null);
+    else setCell(tr, cur.col, cur.str, { f: 0, fx: ch });
     fullRedraw();
     return;
   }
   const cell = getCell(tr, cur.col, cur.str);
-  if (!cell || cell.fx === "x") return;
+  if (!cell || cell.fx === "x" || cell.fx === "*") return;
   pushUndo();
   cell.fx = cell.fx === ch ? null : ch;
+  fullRedraw();
+}
+
+function setTrackFx(type, value) {
+  pushUndo();
+  const tr = track();
+  if (!tr.fx) tr.fx = {};
+  const curFx = tr.fx[cur.col];
+  if (curFx && curFx.t === type && (type === TFX.STROKE_DOWN || type === TFX.STROKE_UP))
+    delete tr.fx[cur.col];
+  else tr.fx[cur.col] = { t: type, v: value | 0 };
+  fullRedraw();
+}
+
+function removeTrackFx() {
+  const tr = track();
+  if (!tr.fx || !tr.fx[cur.col]) return;
+  pushUndo();
+  delete tr.fx[cur.col];
+  fullRedraw();
+}
+
+function repeatPrevTrackFx() {
+  const tr = track();
+  if (!tr.fx) return;
+  let best = -1;
+  for (const k of Object.keys(tr.fx)) {
+    const c = Number(k);
+    if (c < cur.col && c > best) best = c;
+  }
+  if (best < 0) return;
+  pushUndo();
+  tr.fx[cur.col] = { ...tr.fx[best] };
+  fullRedraw();
+}
+
+function clearTrackEffects() {
+  pushUndo();
+  track().fx = {};
   fullRedraw();
 }
 
@@ -484,33 +765,27 @@ function clearCell() {
 
 function insertSpace() {
   pushUndo();
-  const tr = track();
-  ensureCols(tr, cur.col);
-  tr.spaces.splice(cur.col, 0, null);
+  trackInsertCols(track(), cur.col, 1);
   fullRedraw();
 }
 
 function deleteSpace() {
   pushUndo();
-  const tr = track();
-  if (cur.col < tr.spaces.length) tr.spaces.splice(cur.col, 1);
+  trackRemoveCols(track(), cur.col, 1);
   clampCursor();
   fullRedraw();
 }
 
 function selectAll() {
   selAnchor = 0;
-  cur.col = songCols() - 1;
+  cur.col = trackGeom(track()).cols - 1;
   fullRedraw();
 }
 
 function copySelection(cut) {
   const sel = selection() || [cur.col, cur.col];
   const tr = track();
-  clipboard = {
-    strings: tr.tuning.length,
-    cols: []
-  };
+  clipboard = { cols: [] };
   for (let c = sel[0]; c <= sel[1]; c++) {
     const sp = tr.spaces[c];
     clipboard.cols.push(sp ? sp.map(cell => cell ? { ...cell } : null) : null);
@@ -527,7 +802,7 @@ function pasteClipboard() {
   if (!clipboard) return;
   pushUndo();
   const tr = track();
-  ensureCols(tr, cur.col + clipboard.cols.length);
+  while (tr.spaces.length < cur.col + clipboard.cols.length) tr.spaces.push(null);
   for (let i = 0; i < clipboard.cols.length; i++) {
     const src = clipboard.cols[i];
     if (!src) { tr.spaces[cur.col + i] = null; continue; }
@@ -539,12 +814,20 @@ function pasteClipboard() {
   fullRedraw();
 }
 
+function switchTrack(d) {
+  curTrack = (curTrack + d + song.tracks.length) % song.tracks.length;
+  clampCursor();
+  selAnchor = null;
+  fullRedraw();
+}
+
 /* ================= keyboard ================= */
 
 document.addEventListener("keydown", e => {
   if (!document.getElementById("dialoglayer").hidden) {
     if (e.key === "Escape") closeDialog(false);
-    if (e.key === "Enter" && e.target.tagName !== "TEXTAREA") closeDialog(true);
+    if (e.key === "Enter" && e.target.tagName !== "TEXTAREA" && e.target.tagName !== "BUTTON")
+      closeDialog(true);
     return;
   }
   if (menuOpen != null && e.key === "Escape") { closeMenus(); return; }
@@ -571,8 +854,9 @@ document.addEventListener("keydown", e => {
       case "s": e.preventDefault(); saveSong(); return;
       case "o": e.preventDefault(); openSongDialog(); return;
       case "n": e.preventDefault(); newSong(); return;
+      case "p": e.preventDefault(); printPreview(); return;
       case "home": e.preventDefault(); cur.col = 0; selAnchor = null; ensureCursorVisible(); fullRedraw(); return;
-      case "end": e.preventDefault(); cur.col = songCols() - 1; selAnchor = null; ensureCursorVisible(); fullRedraw(); return;
+      case "end": e.preventDefault(); cur.col = trackGeom(track()).cols - 1; selAnchor = null; ensureCursorVisible(); fullRedraw(); return;
       case "arrowup": e.preventDefault(); switchTrack(-1); return;
       case "arrowdown": e.preventDefault(); switchTrack(1); return;
       case "delete": e.preventDefault(); deleteSpace(); return;
@@ -580,19 +864,26 @@ document.addEventListener("keydown", e => {
     return;
   }
 
+  const g = trackGeom(track());
+  const curBar = barOfCol(g, cur.col);
   switch (k) {
     case "ArrowLeft":  e.preventDefault(); moveCursor(-1, 0, e.shiftKey); return;
     case "ArrowRight": e.preventDefault(); moveCursor(1, 0, e.shiftKey); return;
     case "ArrowUp":    e.preventDefault(); moveCursor(0, -1, e.shiftKey); return;
     case "ArrowDown":  e.preventDefault(); moveCursor(0, 1, e.shiftKey); return;
-    case "PageUp":     e.preventDefault(); moveCursor(-song.spacesPerBar, 0, e.shiftKey); return;
-    case "PageDown":   e.preventDefault(); moveCursor(song.spacesPerBar, 0, e.shiftKey); return;
+    case "PageUp": e.preventDefault();
+      moveCursor((g.bars[Math.max(0, curBar - 1)].start) - cur.col, 0, e.shiftKey); return;
+    case "PageDown": e.preventDefault();
+      moveCursor((curBar + 1 < g.bars.length ? g.bars[curBar + 1].start : g.cols - 1) - cur.col, 0, e.shiftKey); return;
     case "Home": e.preventDefault();
-      cur.col = Math.floor(cur.col / song.spacesPerBar) * song.spacesPerBar;
-      selAnchor = e.shiftKey ? selAnchor : null; fullRedraw(); return;
+      cur.col = g.bars[curBar].start;
+      if (!e.shiftKey) selAnchor = null;
+      fullRedraw(); return;
     case "End": e.preventDefault();
-      cur.col = Math.floor(cur.col / song.spacesPerBar) * song.spacesPerBar + song.spacesPerBar - 1;
-      clampCursor(); selAnchor = e.shiftKey ? selAnchor : null; fullRedraw(); return;
+      cur.col = g.bars[curBar].start + g.bars[curBar].cols - 1;
+      clampCursor();
+      if (!e.shiftKey) selAnchor = null;
+      fullRedraw(); return;
     case "Delete": e.preventDefault(); clearCell(); return;
     case "Backspace": e.preventDefault(); clearCell(); moveCursor(-1, 0, false); return;
     case "Insert": e.preventDefault(); insertSpace(); return;
@@ -600,19 +891,11 @@ document.addEventListener("keydown", e => {
   }
 
   if (/^[0-9]$/.test(k)) { e.preventDefault(); typeDigit(Number(k)); return; }
-  if (EFFECTS[k.toLowerCase()] || k === "/" || k === "\\" || k === "~") {
-    e.preventDefault();
-    typeEffect(k === k.toUpperCase() && EFFECTS[k.toLowerCase()] ? k.toLowerCase() : k);
-    return;
-  }
+  if (k === "u") { e.preventDefault(); setTrackFx(TFX.STROKE_UP, 0); return; }
+  if (k === "d") { e.preventDefault(); setTrackFx(TFX.STROKE_DOWN, 0); return; }
+  if (k === "x" || k === "*") { e.preventDefault(); typeEffect(k); return; }
+  if (EFFECTS[k]) { e.preventDefault(); typeEffect(k); return; }
 });
-
-function switchTrack(d) {
-  curTrack = (curTrack + d + song.tracks.length) % song.tracks.length;
-  clampCursor();
-  selAnchor = null;
-  fullRedraw();
-}
 
 /* ================= mouse ================= */
 
@@ -622,9 +905,8 @@ canvas.addEventListener("mousedown", e => {
   const r = canvas.getBoundingClientRect();
   const hit = xyToCol(e.clientX - r.left, e.clientY - r.top);
   cur.col = hit.col; cur.str = hit.str;
-  selAnchor = e.shiftKey ? (selAnchor ?? cur.col) : null;
-  dragging = true;
   if (!e.shiftKey) selAnchor = cur.col;
+  dragging = true;
   flushPendingDigit();
   fullRedraw();
 });
@@ -643,9 +925,10 @@ window.addEventListener("mouseup", () => {
 canvas.addEventListener("dblclick", e => {
   const r = canvas.getBoundingClientRect();
   const hit = xyToCol(e.clientX - r.left, e.clientY - r.top);
-  const spb = song.spacesPerBar;
-  selAnchor = Math.floor(hit.col / spb) * spb;
-  cur.col = Math.min(selAnchor + spb - 1, songCols() - 1);
+  const g = trackGeom(track());
+  const k = barOfCol(g, hit.col);
+  selAnchor = g.bars[k].start;
+  cur.col = Math.min(g.bars[k].start + g.bars[k].cols - 1, g.cols - 1);
   fullRedraw();
 });
 
@@ -658,10 +941,12 @@ const MENUS = [
     ["New", "Ctrl+N", newSong],
     ["Open...", "Ctrl+O", openSongDialog],
     ["Save", "Ctrl+S", saveSong],
-    ["Save As...", "", saveSongAs],
+    ["Save As...", "", saveSong],
     null,
     ["Export Text...", "", exportText],
     ["Export MIDI...", "", exportMidi],
+    null,
+    ["Print Preview...", "Ctrl+P", printPreview],
     null,
     ["Song Properties...", "", songPropertiesDialog],
     null,
@@ -692,6 +977,10 @@ const MENUS = [
     ["Previous Track", "Ctrl+Up", () => switchTrack(-1)],
     ["Next Track", "Ctrl+Down", () => switchTrack(1)],
     null,
+    ["Save Preset Tuning...", "", saveTuningDialog],
+    ["Delete Preset Tuning...", "", deleteTuningDialog],
+    ["Reset Preset Tuning List", "", resetTunings],
+    null,
     ["Properties...", "", trackPropertiesDialog]
   ]],
   ["Bar", () => [
@@ -699,32 +988,58 @@ const MENUS = [
     ["Insert Bar", "", insertBar],
     ["Delete Bar", "", deleteBar],
     null,
+    ["Bar Line Change...", "", barLineDialog],
+    null,
     ["Go to Bar...", "", goToBarDialog]
   ]],
-  ["Effects", () => [
-    ...Object.entries(EFFECTS).map(([ch, name]) => {
-      const cell = getCell(track(), cur.col, cur.str);
-      return [name, ch, () => typeEffect(ch), false,
-              !!(cell && cell.fx === ch)];
-    }),
-    null,
-    ["Clear Track Effects", "", clearTrackEffects]
-  ]],
+  ["Effects", () => {
+    const tr = track();
+    const cell = getCell(tr, cur.col, cur.str);
+    const fx = tr.fx && tr.fx[cur.col];
+    return [
+      ...Object.entries(EFFECTS).map(([ch, name]) =>
+        [name, ch, () => typeEffect(ch), false, !!(cell && cell.fx === ch)]),
+      null,
+      ["Stroke Down", "d", () => setTrackFx(TFX.STROKE_DOWN, 0), false, !!(fx && fx.t === TFX.STROKE_DOWN)],
+      ["Stroke Up", "u", () => setTrackFx(TFX.STROKE_UP, 0), false, !!(fx && fx.t === TFX.STROKE_UP)],
+      null,
+      ["Tempo Change...", "", () => trackFxDialog(TFX.TEMPO)],
+      ["Instrument Change...", "", () => trackFxDialog(TFX.INSTRUMENT)],
+      ["Volume Change...", "", () => trackFxDialog(TFX.VOLUME)],
+      ["Pan Change...", "", () => trackFxDialog(TFX.PAN)],
+      ["Chorus Change...", "", () => trackFxDialog(TFX.CHORUS)],
+      ["Reverb Change...", "", () => trackFxDialog(TFX.REVERB)],
+      ["Pitch Bend Change...", "", () => trackFxDialog(TFX.PITCH_BEND)],
+      null,
+      ["Repeat Previous Track Effect", "", repeatPrevTrackFx],
+      ["Remove Track Effect", "", removeTrackFx, !fx],
+      ["Clear Track Effects", "", clearTrackEffects]
+    ];
+  }],
   ["Player", () => [
     ["Play from Start", "F5", () => playFrom(0)],
     ["Play from Cursor", "F6", () => playFrom(cur.col)],
     ["Stop", "F8", stopPlayback, !playing],
     null,
-    ["Loop", "", () => { opts.loop = !opts.loop; }, false, opts.loop],
-    ["Metronome", "", () => { opts.metronome = !opts.metronome; }, false, opts.metronome],
+    ["Tracks...", "", playerTracksDialog],
     null,
-    ["Tempo...", "", tempoDialog]
+    ["Loop", "", () => { opts.loop = !opts.loop; savePrefs(); }, false, opts.loop],
+    ["Metronome", "", () => { opts.metronome = !opts.metronome; savePrefs(); }, false, opts.metronome],
+    ["Metronome Settings...", "", metronomeDialog],
+    null,
+    ["Tempo...", "", tempoDialog],
+    ["Tempo Tap...", "", tempoTapDialog]
   ]],
   ["Options", () => [
-    ["Bar Numbers", "", () => { opts.barNumbers = !opts.barNumbers; fullRedraw(); }, false, opts.barNumbers],
-    ["Cursor Blink", "", () => { opts.caretBlink = !opts.caretBlink; fullRedraw(); }, false, opts.caretBlink],
-    ["Follow Playback", "", () => { opts.followPlayback = !opts.followPlayback; }, false, opts.followPlayback],
-    ["Rewind After Stop", "", () => { opts.rewindAfterStop = !opts.rewindAfterStop; }, false, opts.rewindAfterStop]
+    ["Bar Numbers", "", () => { opts.barNumbers = !opts.barNumbers; savePrefs(); fullRedraw(); }, false, opts.barNumbers],
+    ["Cursor Blink", "", () => { opts.caretBlink = !opts.caretBlink; savePrefs(); fullRedraw(); }, false, opts.caretBlink],
+    ["Follow Playback", "", () => { opts.followPlayback = !opts.followPlayback; savePrefs(); }, false, opts.followPlayback],
+    ["Rewind After Stop", "", () => { opts.rewindAfterStop = !opts.rewindAfterStop; savePrefs(); }, false, opts.rewindAfterStop],
+    null,
+    ...["Small", "Medium", "Large"].map(sz =>
+      ["Font: " + sz, "", () => { opts.fontSize = sz; savePrefs(); fullRedraw(); }, false, opts.fontSize === sz]),
+    null,
+    ["Colors...", "", colorsDialog]
   ]],
   ["Help", () => [
     ["Keyboard Shortcuts...", "", shortcutsDialog],
@@ -794,6 +1109,7 @@ document.addEventListener("mousedown", e => {
 /* ================= dialogs ================= */
 
 let dialogResolve = null;
+const esc = s => String(s).replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
 
 function showDialog(title, bodyHTML, buttons) {
   const layer = document.getElementById("dialoglayer");
@@ -826,8 +1142,8 @@ function closeDialog(ok) {
 }
 
 function msgBox(title, text) {
-  return showDialog(title, "<div style='padding:4px 0'>" +
-    text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/\n/g, "<br>") +
+  return showDialog(title, "<div style='padding:4px 0;white-space:pre-wrap'>" +
+    String(text).replace(/&/g, "&amp;").replace(/</g, "&lt;") +
     "</div>", ["OK"]);
 }
 
@@ -842,68 +1158,194 @@ async function tempoDialog() {
   song.tempo = t;
 }
 
+async function tempoTapDialog() {
+  const p = showDialog("Tempo Tap",
+    "<div style='text-align:center'><button id='d-tapbtn' style='width:140px;height:48px'>Tap</button>" +
+    "<div style='margin-top:8px'>Tapped tempo: <b id='d-tapval'>-</b> BPM</div>" +
+    "<input type='hidden' id='d-tap' value=''></div>", ["OK", "Cancel"]);
+  const taps = [];
+  document.getElementById("d-tapbtn").addEventListener("click", () => {
+    taps.push(performance.now());
+    if (taps.length > 5) taps.shift();
+    if (taps.length >= 2) {
+      const iv = (taps[taps.length - 1] - taps[0]) / (taps.length - 1);
+      const bpm = Math.round(60000 / iv);
+      document.getElementById("d-tapval").textContent = bpm;
+      document.getElementById("d-tap").value = bpm;
+    }
+  });
+  const v = await p;
+  if (!v || !v["d-tap"]) return;
+  const t = Math.max(10, Math.min(999, Number(v["d-tap"])));
+  pushUndo();
+  song.tempo = t;
+}
+
+async function metronomeDialog() {
+  const v = await showDialog("Metronome",
+    "<div class='dlgrow'><input type='checkbox' id='d-on'" + (opts.metronome ? " checked" : "") +
+    "><label for='d-on' style='display:inline'>Metronome on</label></div>" +
+    "<div class='dlgrow'><input type='checkbox' id='d-acc'" + (opts.metroAccent ? " checked" : "") +
+    "><label for='d-acc' style='display:inline'>Accent first beat of bar</label></div>" +
+    "<label>Volume:</label><input type='range' id='d-vol' min='0' max='127' value='" + opts.metroVolume + "'>",
+    ["OK", "Cancel"]);
+  if (!v) return;
+  opts.metronome = v["d-on"];
+  opts.metroAccent = v["d-acc"];
+  opts.metroVolume = Number(v["d-vol"]);
+  savePrefs();
+}
+
+async function trackFxDialog(type) {
+  const tr = track();
+  const existing = tr.fx && tr.fx[cur.col] && tr.fx[cur.col].t === type ? tr.fx[cur.col].v : null;
+  let body, parse;
+  if (type === TFX.TEMPO) {
+    body = "<label>New tempo (BPM):</label><input type='number' id='d-v' min='10' max='999' value='" +
+      (existing ?? song.tempo) + "'>";
+    parse = v => Math.max(10, Math.min(999, Number(v) || song.tempo));
+  } else if (type === TFX.INSTRUMENT) {
+    body = "<label>Instrument:</label><select id='d-v' style='width:100%'>" +
+      GM_INSTRUMENTS.map((n, i) => "<option value='" + i + "'" +
+        ((existing ?? tr.instrument) === i ? " selected" : "") + ">" + (i + 1) + " - " + n + "</option>").join("") +
+      "</select>";
+    parse = v => Number(v) & 0x7f;
+  } else if (type === TFX.PITCH_BEND) {
+    body = "<label>Pitch bend (semitones, -2 to +2):</label>" +
+      "<input type='number' id='d-v' min='-2' max='2' step='0.5' value='" +
+      (existing != null ? (existing / 8192 * 2).toFixed(1) : "0") + "'>";
+    parse = v => Math.max(-8192, Math.min(8191, Math.round(Number(v) / 2 * 8192)));
+  } else {
+    const def = { [TFX.VOLUME]: tr.volume, [TFX.PAN]: tr.pan,
+                  [TFX.CHORUS]: tr.chorus, [TFX.REVERB]: tr.reverb }[type] ?? 64;
+    body = "<label>" + TFX_NAMES[type] + " (0-127):</label>" +
+      "<input type='number' id='d-v' min='0' max='127' value='" + (existing ?? def) + "'>";
+    parse = v => Math.max(0, Math.min(127, Number(v) || 0));
+  }
+  const v = await showDialog(TFX_NAMES[type], body, ["OK", "Cancel"]);
+  if (!v) return;
+  setTrackFx(type, parse(v["d-v"]));
+}
+
 async function addBarsDialog() {
   const v = await showDialog("Add Bars",
-    "<label>Number of bars to add:</label><input type='number' id='d-bars' min='1' max='500' value='4'>",
+    "<label>Number of bars to add:</label><input type='number' id='d-bars' min='1' max='500' value='4'>" +
+    "<label>Spaces per bar:</label><input type='number' id='d-spaces' min='1' max='64' value='" +
+    song.spacesPerBar + "'>",
     ["OK", "Cancel"]);
   if (!v) return;
   const n = Math.max(1, Math.min(500, Number(v["d-bars"]) || 0));
+  const sp = Math.max(1, Math.min(64, Number(v["d-spaces"]) || 16));
   pushUndo();
-  for (const tr of song.tracks) ensureCols(tr, songCols() + n * song.spacesPerBar);
+  for (let i = 0; i < n; i++) bars().push({ spaces: sp, open: false, close: false, double: false, repeat: 0 });
+  invalidateGeom();
   fullRedraw();
 }
 
 function insertBar() {
   pushUndo();
-  const at = Math.floor(cur.col / song.spacesPerBar) * song.spacesPerBar;
-  for (const tr of song.tracks) {
-    ensureCols(tr, at);
-    tr.spaces.splice(at, 0, ...new Array(song.spacesPerBar).fill(null));
-  }
+  const starts = song.tracks.map(tr => {
+    const g = trackGeom(tr);
+    const k = barOfCol(trackGeom(track()), cur.col);
+    return g.bars[k] ? g.bars[k].start : g.cols;
+  });
+  const k = barOfCol(trackGeom(track()), cur.col);
+  const nb = makeBar();
+  song.tracks.forEach((tr, i) => trackInsertCols(tr, starts[i], nb.spaces));
+  bars().splice(k, 0, nb);
+  invalidateGeom();
   fullRedraw();
 }
 
 function deleteBar() {
+  if (bars().length <= 1) return;
   pushUndo();
-  const at = Math.floor(cur.col / song.spacesPerBar) * song.spacesPerBar;
-  for (const tr of song.tracks) {
-    if (at < tr.spaces.length) tr.spaces.splice(at, song.spacesPerBar);
+  const k = barOfCol(trackGeom(track()), cur.col);
+  song.tracks.forEach(tr => {
+    const g = trackGeom(tr);
+    const b = g.bars[k];
+    if (b) trackRemoveCols(tr, b.start, b.cols);
+  });
+  bars().splice(k, 1);
+  invalidateGeom();
+  clampCursor();
+  fullRedraw();
+}
+
+async function barLineDialog() {
+  const g = trackGeom(track());
+  const k = barOfCol(g, cur.col);
+  const b = bars()[k];
+  const v = await showDialog("Bar Line Change",
+    "<label>Bar " + (k + 1) + " — spaces in bar:</label>" +
+    "<input type='number' id='d-spaces' min='1' max='64' value='" + b.spaces + "'>" +
+    "<div class='dlgrow'><input type='checkbox' id='d-double'" + (b.double ? " checked" : "") +
+    "><label for='d-double' style='display:inline'>Double bar line</label></div>" +
+    "<div class='dlgrow'><input type='checkbox' id='d-open'" + (b.open ? " checked" : "") +
+    "><label for='d-open' style='display:inline'>Open repeat</label></div>" +
+    "<div class='dlgrow'><input type='checkbox' id='d-close'" + (b.close ? " checked" : "") +
+    "><label for='d-close' style='display:inline'>Close repeat, play</label>" +
+    "<input type='number' id='d-repeat' min='2' max='99' value='" + Math.max(2, b.repeat || 2) +
+    "' style='width:50px'><span>times</span></div>",
+    ["OK", "Cancel"]);
+  if (!v) return;
+  pushUndo();
+  const newSpaces = Math.max(1, Math.min(64, Number(v["d-spaces"]) || b.spaces));
+  const delta = newSpaces - b.spaces;
+  if (delta !== 0) {
+    song.tracks.forEach(tr => {
+      const gt = trackGeom(tr);
+      const bt = gt.bars[k];
+      if (!bt) return;
+      if (delta > 0) trackInsertCols(tr, bt.start + bt.cols, delta);
+      else trackRemoveCols(tr, bt.start + bt.cols + delta, -delta);
+    });
   }
+  b.spaces = newSpaces;
+  b.double = v["d-double"];
+  b.open = v["d-open"];
+  b.close = v["d-close"];
+  b.repeat = b.close ? Math.max(2, Math.min(99, Number(v["d-repeat"]) || 2)) : 0;
+  invalidateGeom();
   clampCursor();
   fullRedraw();
 }
 
 async function goToBarDialog() {
+  const g = trackGeom(track());
   const v = await showDialog("Go to Bar",
     "<label>Bar number:</label><input type='number' id='d-bar' min='1' value='" +
-    (Math.floor(cur.col / song.spacesPerBar) + 1) + "'>", ["OK", "Cancel"]);
+    (barOfCol(g, cur.col) + 1) + "'>", ["OK", "Cancel"]);
   if (!v) return;
   const b = Number(v["d-bar"]);
   if (!(b >= 1)) { msgBox("TabIt", "Bar number must be at least 1."); return; }
-  cur.col = Math.min((b - 1) * song.spacesPerBar, songCols() - 1);
+  const k = Math.min(b - 1, g.bars.length - 1);
+  cur.col = g.bars[k].start;
   selAnchor = null;
   ensureCursorVisible();
   fullRedraw();
 }
 
 async function songPropertiesDialog() {
-  const esc = s => String(s).replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
   const v = await showDialog("Song Properties",
     "<label>Title:</label><input type='text' id='d-title' value=\"" + esc(song.title) + "\" style='width:100%'>" +
     "<label>Artist:</label><input type='text' id='d-artist' value=\"" + esc(song.artist) + "\" style='width:100%'>" +
+    "<label>Album:</label><input type='text' id='d-album' value=\"" + esc(song.album || "") + "\" style='width:100%'>" +
+    "<label>Transcribed by:</label><input type='text' id='d-trans' value=\"" + esc(song.transcribedBy || "") + "\" style='width:100%'>" +
     "<label>Comments:</label><input type='text' id='d-comments' value=\"" + esc(song.comments) + "\" style='width:100%'>",
     ["OK", "Cancel"]);
   if (!v) return;
   pushUndo();
   song.title = v["d-title"];
   song.artist = v["d-artist"];
+  song.album = v["d-album"];
+  song.transcribedBy = v["d-trans"];
   song.comments = v["d-comments"];
   updateTitle();
 }
 
 async function trackPropertiesDialog() {
   const tr = track();
-  const esc = s => String(s).replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
   const instOpts =
     GM_INSTRUMENTS.map((n, i) =>
       "<option value='" + i + "'" + (!tr.isDrum && tr.instrument === i ? " selected" : "") + ">" +
@@ -912,11 +1354,11 @@ async function trackPropertiesDialog() {
       "<option value='d" + i + "'" + (tr.isDrum && tr.drumKit === i ? " selected" : "") + ">" +
       "Drums - " + n + "</option>").join("");
   const tunOpts = "<option value=''>-- preset --</option>" +
-    Object.keys(TUNING_PRESETS).map(n => "<option>" + n + "</option>").join("");
+    Object.keys(allTunings()).map(n => "<option>" + esc(n) + "</option>").join("");
   const stringRows = tr.tuning.map((m, s) =>
     "<div class='dlgrow'><span style='width:60px'>String " + (s + 1) + ":</span>" +
     "<select id='d-str" + s + "'>" +
-    Array.from({ length: 60 }, (_, i) => i + 23).map(mm =>
+    Array.from({ length: 70 }, (_, i) => i + 16).map(mm =>
       "<option value='" + mm + "'" + (mm === m ? " selected" : "") + ">" + noteName(mm) + "</option>").join("") +
     "</select></div>").join("");
   const dlg = showDialog("Track " + (curTrack + 1) + " Properties",
@@ -927,12 +1369,17 @@ async function trackPropertiesDialog() {
     "<div class='dlgrow'><span style='width:60px'>Volume:</span>" +
     "<input type='range' id='d-vol' min='0' max='127' value='" + tr.volume + "'></div>" +
     "<div class='dlgrow'><span style='width:60px'>Pan:</span>" +
-    "<input type='range' id='d-pan' min='0' max='127' value='" + tr.pan + "'></div>",
+    "<input type='range' id='d-pan' min='0' max='127' value='" + tr.pan + "'></div>" +
+    "<div class='dlgrow'><span style='width:60px'>Reverb:</span>" +
+    "<input type='range' id='d-rev' min='0' max='127' value='" + (tr.reverb || 0) + "'></div>" +
+    "<div class='dlgrow'><span style='width:60px'>Chorus:</span>" +
+    "<input type='range' id='d-cho' min='0' max='127' value='" + (tr.chorus || 0) + "'></div>" +
+    "<div class='dlgrow'><input type='checkbox' id='d-cut'" + (tr.cutAnyString ? " checked" : "") +
+    "><label for='d-cut' style='display:inline'>Notes ring until next event on any string</label></div>",
     ["OK", "Cancel"]);
-  // picking a preset fills the string selects; editing a string clears the preset
   const presetSel = document.getElementById("d-preset");
   presetSel.addEventListener("change", () => {
-    const p = TUNING_PRESETS[presetSel.value];
+    const p = allTunings()[presetSel.value];
     if (!p) return;
     for (let s = 0; s < tr.tuning.length; s++) {
       const el = document.getElementById("d-str" + s);
@@ -950,15 +1397,18 @@ async function trackPropertiesDialog() {
   const inst = v["d-inst"];
   if (String(inst).startsWith("d")) { tr.isDrum = true; tr.drumKit = Number(String(inst).slice(1)); }
   else { tr.isDrum = false; tr.instrument = Number(inst); }
-  if (v["d-preset"] && TUNING_PRESETS[v["d-preset"]]) {
-    const p = TUNING_PRESETS[v["d-preset"]];
-    retuneTrack(tr, p);
+  if (v["d-preset"] && allTunings()[v["d-preset"]]) {
+    retuneTrack(tr, allTunings()[v["d-preset"]]);
   } else {
     for (let s = 0; s < tr.tuning.length; s++)
       if (v["d-str" + s] != null) tr.tuning[s] = Number(v["d-str" + s]);
   }
   tr.volume = Number(v["d-vol"]);
   tr.pan = Number(v["d-pan"]);
+  tr.reverb = Number(v["d-rev"]);
+  tr.chorus = Number(v["d-cho"]);
+  tr.cutAnyString = v["d-cut"];
+  invalidateGeom();
   clampCursor();
   fullRedraw();
 }
@@ -977,12 +1427,46 @@ function retuneTrack(tr, tuning) {
   }
 }
 
+async function saveTuningDialog() {
+  const tr = track();
+  const v = await showDialog("Save Preset Tuning",
+    "<label>Save the current track's tuning (" +
+    tr.tuning.map(noteName).join(" ") + ") as:</label>" +
+    "<input type='text' id='d-name' value='' style='width:100%'>", ["OK", "Cancel"]);
+  if (!v || !v["d-name"]) return;
+  const name = v["d-name"];
+  if (allTunings()[name] && !userTunings[name]) {
+    msgBox("TabIt", "A tuning named \"" + name + "\" already exists.");
+    return;
+  }
+  userTunings[name] = tr.tuning.slice();
+  savePrefs();
+}
+
+async function deleteTuningDialog() {
+  const names = Object.keys(userTunings);
+  if (!names.length) { msgBox("TabIt", "There are no user preset tunings to delete."); return; }
+  const v = await showDialog("Delete Preset Tuning",
+    "<label>Delete the tuning:</label><select id='d-name' style='width:100%'>" +
+    names.map(n => "<option>" + esc(n) + "</option>").join("") + "</select>", ["OK", "Cancel"]);
+  if (!v) return;
+  delete userTunings[v["d-name"]];
+  savePrefs();
+}
+
+async function resetTunings() {
+  const v = await showDialog("TabIt", "Reset the preset tuning list, removing all user tunings?", ["OK", "Cancel"]);
+  if (!v) return;
+  userTunings = {};
+  savePrefs();
+}
+
 async function addTrack() {
   pushUndo();
-  const t = makeTrack("Track " + (song.tracks.length + 1), 27, TUNING_PRESETS["(Standard)"]);
-  ensureCols(t, songCols());
+  const t = makeTrack("Track " + (song.tracks.length + 1), 27, BUILTIN_TUNINGS["(Standard)"]);
   song.tracks.push(t);
   curTrack = song.tracks.length - 1;
+  invalidateGeom();
   clampCursor();
   fullRedraw();
   trackPropertiesDialog();
@@ -999,36 +1483,90 @@ async function deleteTrack() {
   pushUndo();
   song.tracks.splice(curTrack, 1);
   curTrack = Math.max(0, curTrack - 1);
+  invalidateGeom();
   clampCursor();
   fullRedraw();
 }
 
-function clearTrackEffects() {
-  pushUndo();
-  for (const sp of track().spaces) {
-    if (!sp) continue;
-    for (const cell of sp) if (cell && cell.fx && cell.fx !== "x") cell.fx = null;
+async function playerTracksDialog() {
+  const rows = song.tracks.map((t, i) =>
+    "<div class='dlgrow'><input type='checkbox' id='d-tr" + i + "'" + (t.played ? " checked" : "") +
+    "><label for='d-tr" + i + "' style='display:inline'>" + (i + 1) + ": " + esc(t.name) +
+    "</label></div>").join("");
+  const v = await showDialog("Player Tracks",
+    "<label>Tracks to play:</label>" + rows, ["OK", "Cancel"]);
+  if (!v) return;
+  const played = song.tracks.map((_, i) => !!v["d-tr" + i]);
+  if (!played.some(p => p)) {
+    msgBox("TabIt", "At least one track must be checked.");
+    return;
   }
+  song.tracks.forEach((t, i) => { t.played = played[i]; });
+  fullRedraw();
+}
+
+async function colorsDialog() {
+  const fields = [["bg","Background"],["text","Text"],["line","Lines"],["barnum","Bar numbers"],
+                  ["cursor","Cursor"],["cursorText","Cursor text"],["sel","Selection"],
+                  ["play","Playhead"],["fxMark","Effect markers"]];
+  const schemes = JSON.parse(localStorage.getItem("WinTabIt-Schemes") || "{}");
+  const v = await showDialog("Colors",
+    "<label>Scheme:</label><div class='dlgrow'><select id='d-scheme' style='flex:1'>" +
+    "<option value=''>(current)</option>" +
+    Object.keys(schemes).map(n => "<option>" + esc(n) + "</option>").join("") +
+    "</select></div>" +
+    fields.map(([k, label]) =>
+      "<div class='dlgrow'><span style='width:90px'>" + label + ":</span>" +
+      "<input type='color' id='d-col-" + k + "' value='" + COLORS[k] + "'></div>").join("") +
+    "<div class='dlgrow'><span style='width:90px'>Save scheme:</span>" +
+    "<input type='text' id='d-schemename' placeholder='name' style='flex:1'></div>" +
+    "<div class='dlgrow'><button id='d-resetcol' type='button' style='min-width:120px'>Reset Defaults</button></div>",
+    ["OK", "Cancel"]);
+  const schemeSel = document.getElementById("d-scheme");
+  if (schemeSel) schemeSel.addEventListener("change", () => {
+    const s = schemes[schemeSel.value];
+    if (!s) return;
+    for (const [k] of fields) {
+      const el = document.getElementById("d-col-" + k);
+      if (el && s[k]) el.value = s[k];
+    }
+  });
+  const resetBtn = document.getElementById("d-resetcol");
+  if (resetBtn) resetBtn.addEventListener("click", () => {
+    const d = defaultColors();
+    for (const [k] of fields) {
+      const el = document.getElementById("d-col-" + k);
+      if (el) el.value = d[k];
+    }
+  });
+  if (!v) return;
+  for (const [k] of fields) if (v["d-col-" + k]) COLORS[k] = v["d-col-" + k];
+  if (v["d-schemename"]) {
+    schemes[v["d-schemename"]] = { ...COLORS };
+    try { localStorage.setItem("WinTabIt-Schemes", JSON.stringify(schemes)); } catch (e) {}
+  }
+  savePrefs();
   fullRedraw();
 }
 
 function shortcutsDialog() {
   msgBox("Keyboard Shortcuts",
-    "Arrows\tMove cursor\n" +
-    "0-9\tEnter fret number (1x/2x combine for 10-28)\n" +
-    "Del / -\tClear note or selection\n" +
+    "Arrows\t\tMove cursor\n" +
+    "0-9\t\tEnter fret (combine digits for 10+)\n" +
+    "Del / -\t\tClear note or selection\n" +
     "Backspace\tClear and move left\n" +
-    "Ins\tInsert space   Ctrl+Del: delete space\n" +
-    "h p / \\ b r ~ t\tNote effects\n" +
-    "x\tDead note\n" +
+    "Ins / Ctrl+Del\tInsert / delete space\n" +
+    "h p / \\ b ^ r ~\tHammer, pull, slides, bends, release, vibrato\n" +
+    "t s w ( < {\tTap, slap, whammy, soft, harmonic, tremolo\n" +
+    "x\t\tDead note     *  Stop string\n" +
+    "u / d\t\tStroke up / stroke down\n" +
     "Shift+Arrows\tSelect spaces\n" +
     "Ctrl+C/X/V\tCopy / Cut / Paste\n" +
     "Ctrl+Up/Down\tPrevious / next track\n" +
     "PgUp/PgDn\tPrevious / next bar\n" +
     "Home/End\tStart / end of bar\n" +
-    "F5\tPlay from start\n" +
-    "F6 / Space\tPlay from cursor\n" +
-    "F8 / Space\tStop");
+    "F5 / F6 / F8\tPlay from start / from cursor / stop\n" +
+    "Space\t\tPlay from cursor / stop");
 }
 
 function aboutDialog() {
@@ -1037,179 +1575,168 @@ function aboutDialog() {
     "Original TabIt © GTAB Software (defunct).\n" +
     "This is an unofficial fan recreation of the look and feel\n" +
     "of the classic Windows tablature editor, rebuilt for the\n" +
-    "browser from a Ghidra analysis of the original program.\n\n" +
+    "browser from a Ghidra analysis of the original program.\n" +
+    "Opens original .tbt files (versions 0x6f-0x72).\n\n" +
     "Not affiliated with or endorsed by the original authors.");
 }
 
-/* ================= file operations ================= */
+/* ================= performance builder =================
+   Produces the playback order with repeats unrolled, a tempo map,
+   and note/effect events in "plain space" time units. */
 
-function download(name, data, mime) {
-  const blob = data instanceof Blob ? data : new Blob([data], { type: mime || "application/octet-stream" });
-  const a = document.createElement("a");
-  a.href = URL.createObjectURL(blob);
-  a.download = name;
-  a.click();
-  setTimeout(() => URL.revokeObjectURL(a.href), 5000);
-}
+function buildPerformance() {
+  const bl = bars();
+  const geoms = song.tracks.map(trackGeom);
+  // bar plain ranges
+  const barPlain = [];
+  let p = 0;
+  for (const b of bl) { barPlain.push([p, p + b.spaces]); p += b.spaces; }
 
-async function newSong() {
-  const v = await showDialog("TabIt", "Discard the current song and start a new one?", ["OK", "Cancel"]);
-  if (!v) return;
-  song = blankSong();
-  ensureCols(song.tracks[0], song.spacesPerBar * 4);
-  fileName = null;
-  curTrack = 0; cur = { col: 0, str: 0 }; selAnchor = null;
-  undoStack.length = 0; redoStack.length = 0;
-  fullRedraw();
-}
-
-function saveSong() {
-  const name = (fileName || song.title || "Untitled") + ".tabit.json";
-  download(name.replace(/\.tabit\.json(\.tabit\.json)?$/, "") + ".tabit.json",
-    JSON.stringify({ format: "tabit-web-1", song }, null, 1), "application/json");
-}
-
-function saveSongAs() { saveSong(); }
-
-function openSongDialog() {
-  document.getElementById("fileinput").click();
-}
-
-document.getElementById("fileinput").addEventListener("change", async e => {
-  const f = e.target.files[0];
-  e.target.value = "";
-  if (!f) return;
-  try {
-    const data = JSON.parse(await f.text());
-    if (data.format !== "tabit-web-1" || !data.song || !Array.isArray(data.song.tracks))
-      throw new Error("incompatible version");
-    song = data.song;
-    fileName = f.name.replace(/\.tabit\.json$|\.json$/, "");
-    curTrack = 0; cur = { col: 0, str: 0 }; selAnchor = null;
-    undoStack.length = 0; redoStack.length = 0;
-    fullRedraw();
-  } catch (err) {
-    msgBox("TabIt", "File \"" + f.name + "\" could not be opened:\n" + err.message);
-  }
-});
-
-/* ---- text export (classic ASCII tab, variable column width) ---- */
-
-function exportText() {
-  const spb = song.spacesPerBar;
-  const lines = [];
-  lines.push(song.title + (song.artist ? " - " + song.artist : ""));
-  lines.push("Tempo: " + song.tempo);
-  lines.push("");
-  for (const tr of song.tracks) {
-    lines.push(tr.name + " (" + (tr.isDrum ? "Drums - " + DRUM_KITS[tr.drumKit] : GM_INSTRUMENTS[tr.instrument]) + ")");
-    const ns = tr.tuning.length;
-    const cols = Math.max(tr.spaces.length, spb);
-    const bars = Math.ceil(cols / spb);
-    const barsPerLine = 4;
-    for (let lineStart = 0; lineStart < bars; lineStart += barsPerLine) {
-      const rows = [];
-      for (let s = 0; s < ns; s++) {
-        let label = NOTE_NAMES[tr.tuning[s] % 12];
-        if (s === 0) label = label.toLowerCase();
-        rows.push((tr.isDrum ? "D" : label).padEnd(2) + "|");
-      }
-      for (let bar = lineStart; bar < Math.min(lineStart + barsPerLine, bars); bar++) {
-        for (let c = bar * spb; c < (bar + 1) * spb; c++) {
-          const sp = c < tr.spaces.length ? tr.spaces[c] : null;
-          let w = 1;
-          if (sp) for (const cell of sp) {
-            if (!cell) continue;
-            const t = (cell.fx === "x" ? "x" : String(cell.f)) + (cell.fx && cell.fx !== "x" ? cell.fx : "");
-            w = Math.max(w, t.length);
-          }
-          for (let s = 0; s < ns; s++) {
-            const cell = sp ? sp[s] : null;
-            const t = cell ? (cell.fx === "x" ? "x" : String(cell.f)) + (cell.fx && cell.fx !== "x" ? cell.fx : "") : "";
-            rows[s] += t.padEnd(w, "-");
-          }
-        }
-        for (let s = 0; s < ns; s++) rows[s] += "|";
-      }
-      lines.push(...rows, "");
+  // unroll repeats into a bar play order
+  const order = [];
+  let sectionStart = 0, pending = [];
+  for (let k = 0; k < bl.length; k++) {
+    if (bl[k].open) sectionStart = k;
+    pending.push(k);
+    if (bl[k].close) {
+      const pre = pending.filter(b2 => b2 < sectionStart);
+      order.push(...pre);
+      const section = pending.filter(b2 => b2 >= sectionStart);
+      const passes = Math.max(2, bl[k].repeat || 0);
+      for (let r = 0; r < passes; r++) order.push(...section);
+      pending = [];
+      sectionStart = k + 1;
     }
-    lines.push("");
   }
-  lines.push("Generated by TabIt Web (tribute to TabIt 2.03)");
-  download((song.title || "Untitled") + ".txt", lines.join("\r\n"), "text/plain");
-}
+  order.push(...pending);
 
-/* ---- MIDI export ---- */
+  // coalesce into plain segments with performance offsets
+  const segs = [];
+  let perf = 0;
+  for (const k of order) {
+    const [p0, p1] = barPlain[k];
+    const last = segs[segs.length - 1];
+    if (last && Math.abs(last.p1 - p0) < EPS) { last.p1 = p1; last.barEnds.push({ bar: k, p0, p1 }); }
+    else segs.push({ p0, p1, perfStart: 0, barEnds: [{ bar: k, p0, p1 }] });
+  }
+  for (const s of segs) { s.perfStart = perf; perf += s.p1 - s.p0; }
+  const perfTotal = perf;
 
-function exportMidi() {
-  const TPQN = 480, TICKS_PER_SPACE = TPQN / 4; // each space is a 16th note
-  const vlq = n => {
-    const out = [n & 0x7f];
-    while ((n >>= 7)) out.unshift((n & 0x7f) | 0x80);
-    return out;
-  };
-  const str2bytes = s => Array.from(s, c => c.charCodeAt(0) & 0xff);
-  const trackChunk = events => {
-    // events: [tick, [bytes...]]
-    events.sort((a, b) => a[0] - b[0]);
-    const data = [];
-    let last = 0;
-    for (const [tick, bytes] of events) {
-      data.push(...vlq(tick - last), ...bytes);
-      last = tick;
+  // tempo map (tempo changes from any track apply globally)
+  const tempoEvents = [];
+  song.tracks.forEach((tr, t) => {
+    for (const k of Object.keys(tr.fx || {})) {
+      const fx = tr.fx[k];
+      if (fx.t !== TFX.TEMPO) continue;
+      const col = Number(k);
+      const g = geoms[t];
+      const plain = g.plainStart[Math.min(col, g.cols)];
+      tempoEvents.push({ plain, bpm: Math.max(10, Math.min(999, fx.v)) });
     }
-    data.push(...vlq(0), 0xff, 0x2f, 0x00);
-    return [0x4d, 0x54, 0x72, 0x6b,
-      (data.length >>> 24) & 255, (data.length >>> 16) & 255,
-      (data.length >>> 8) & 255, data.length & 255, ...data];
+  });
+  tempoEvents.sort((a, b) => a.plain - b.plain);
+  const breaks = [{ pp: 0, bpm: song.tempo }];
+  for (const s of segs) {
+    for (const ev of tempoEvents) {
+      if (ev.plain >= s.p0 - EPS && ev.plain < s.p1 - EPS)
+        breaks.push({ pp: s.perfStart + (ev.plain - s.p0), bpm: ev.bpm });
+    }
+  }
+  breaks.sort((a, b) => a.pp - b.pp);
+  // integrate seconds
+  let sec = 0;
+  for (let i = 0; i < breaks.length; i++) {
+    breaks[i].sec = sec;
+    breaks[i].spd = 60 / breaks[i].bpm / 4; // seconds per plain unit
+    const next = i + 1 < breaks.length ? breaks[i + 1].pp : perfTotal;
+    sec += (next - breaks[i].pp) * breaks[i].spd;
+  }
+  const totalSec = sec;
+  const secAt = pp => {
+    let b = breaks[0];
+    for (let i = breaks.length - 1; i >= 0; i--)
+      if (breaks[i].pp <= pp + EPS) { b = breaks[i]; break; }
+    return b.sec + (pp - b.pp) * b.spd;
   };
 
-  const chunks = [];
-  // tempo track
-  const usPerQuarter = Math.round(60000000 / song.tempo);
-  chunks.push(trackChunk([
-    [0, [0xff, 0x51, 0x03, (usPerQuarter >> 16) & 255, (usPerQuarter >> 8) & 255, usPerQuarter & 255]],
-    [0, [0xff, 0x03, Math.min(127, song.title.length), ...str2bytes(song.title)]]
-  ]));
-
-  let chan = 0;
-  for (const tr of song.tracks) {
-    let ch = tr.isDrum ? 9 : chan;
-    if (!tr.isDrum) { chan++; if (chan === 9) chan++; chan %= 16; }
-    const ev = [];
-    ev.push([0, [0xff, 0x03, Math.min(127, tr.name.length), ...str2bytes(tr.name)]]);
-    if (!tr.isDrum) ev.push([0, [0xc0 | ch, tr.instrument & 127]]);
-    ev.push([0, [0xb0 | ch, 7, tr.volume & 127]]);
-    ev.push([0, [0xb0 | ch, 10, tr.pan & 127]]);
+  // per-track per-column effect state + note records
+  const notes = [];
+  song.tracks.forEach((tr, t) => {
+    const g = geoms[t];
+    const fxList = Object.keys(tr.fx || {}).map(k => [Number(k), tr.fx[k]]).sort((a, b) => a[0] - b[0]);
+    let fi = 0, vol = tr.volume, pan = tr.pan, prog = tr.instrument, bend = tr.pitchBend || 0;
     const ns = tr.tuning.length;
-    for (let s = 0; s < ns; s++) {
-      for (let c = 0; c < tr.spaces.length; c++) {
-        const cell = getCell(tr, c, s);
-        if (!cell || cell.fx === "x") continue;
-        const pitch = Math.min(127, tr.tuning[s] + cell.f);
-        // sustain until the next note on the same string, max 2 bars
-        let end = Math.min(c + song.spacesPerBar * 2, tr.spaces.length);
-        for (let c2 = c + 1; c2 < end; c2++) {
-          if (getCell(tr, c2, s)) { end = c2; break; }
+    for (let c = 0; c < g.cols; c++) {
+      let stroke = 0;
+      while (fi < fxList.length && fxList[fi][0] <= c) {
+        const fx = fxList[fi][1];
+        if (fxList[fi][0] === c && (fx.t === TFX.STROKE_DOWN || fx.t === TFX.STROKE_UP)) stroke = fx.t;
+        if (fx.t === TFX.VOLUME) vol = fx.v;
+        else if (fx.t === TFX.PAN) pan = fx.v;
+        else if (fx.t === TFX.INSTRUMENT) prog = fx.v & 0x7f;
+        else if (fx.t === TFX.PITCH_BEND) bend = fx.v;
+        fi++;
+      }
+      const sp = tr.spaces[c];
+      if (!sp) continue;
+      // stroke order: collect sounding strings
+      const sounding = [];
+      for (let s = 0; s < ns; s++) if (sp[s] && sp[s].fx !== "*") sounding.push(s);
+      for (const s of sounding) {
+        const cell = sp[s];
+        // sustain: next event on this string (or any string)
+        let cut = Math.min(c + 64, g.cols);
+        for (let c2 = c + 1; c2 < cut; c2++) {
+          const sp2 = tr.spaces[c2];
+          if (!sp2) continue;
+          if (tr.cutAnyString ? sp2.some(x => x) : sp2[s]) { cut = c2; break; }
         }
-        ev.push([c * TICKS_PER_SPACE, [0x90 | ch, pitch, 96]]);
-        ev.push([end * TICKS_PER_SPACE, [0x80 | ch, pitch, 0]]);
+        let strokeIdx = 0;
+        if (stroke === TFX.STROKE_DOWN) strokeIdx = sounding.length - 1 - sounding.indexOf(s);
+        else if (stroke === TFX.STROKE_UP) strokeIdx = sounding.indexOf(s);
+        notes.push({
+          t, s, cell,
+          plain: g.plainStart[c],
+          plainEnd: g.plainStart[Math.min(cut, g.cols)],
+          vol, pan, prog, bend,
+          strokeOff: stroke ? strokeIdx * 0.018 : 0
+        });
       }
     }
-    chunks.push(trackChunk(ev));
+  });
+
+  // playhead steps for the current track
+  const g = geoms[curTrack];
+  const steps = [];
+  for (const s of segs) {
+    for (let c = 0; c < g.cols; c++) {
+      const ps = g.plainStart[c];
+      if (ps >= s.p0 - EPS && ps < s.p1 - EPS)
+        steps.push({ pp: s.perfStart + (ps - s.p0), col: c });
+    }
+  }
+  steps.sort((a, b) => a.pp - b.pp);
+
+  // metronome ticks
+  const metro = [];
+  if (opts.metronome) {
+    for (const s of segs) {
+      for (const be of s.barEnds) {
+        for (let q = be.p0; q < be.p1 - EPS; q += 4) {
+          metro.push({ pp: s.perfStart + (q - s.p0), accent: opts.metroAccent && Math.abs(q - be.p0) < EPS });
+        }
+      }
+    }
   }
 
-  const nTracks = chunks.length;
-  const header = [0x4d, 0x54, 0x68, 0x64, 0, 0, 0, 6, 0, 1,
-    (nTracks >> 8) & 255, nTracks & 255, (TPQN >> 8) & 255, TPQN & 255];
-  const bytes = new Uint8Array([...header, ...chunks.flat()]);
-  download((song.title || "Untitled") + ".mid", new Blob([bytes], { type: "audio/midi" }));
+  return { segs, breaks, secAt, totalSec, perfTotal, notes, steps, metro, geoms };
 }
 
 /* ================= playback (Web Audio) ================= */
 
 let audio = null, masterGain = null;
-let schedTimer = null, playT0 = 0, playEndCol = 0, animReq = null;
+let animReq = null;
+let playSteps = null, playStepIdx = 0, playT0 = 0, playTotal = 0, loopCol = 0;
 
 function audioCtx() {
   if (!audio) {
@@ -1222,13 +1749,12 @@ function audioCtx() {
   return audio;
 }
 
-// Karplus-Strong plucked string
 function ksBuffer(ac, freq, dur, damp, drive) {
   const sr = ac.sampleRate;
-  const n = Math.max(8, Math.floor(sr * dur));
+  const n = Math.max(8, Math.floor(sr * Math.min(dur, 4)));
   const buf = ac.createBuffer(1, n, sr);
   const data = buf.getChannelData(0);
-  const period = Math.max(2, Math.round(sr / freq));
+  const period = Math.max(2, Math.round(sr / Math.max(20, freq)));
   const ring = new Float32Array(period);
   for (let i = 0; i < period; i++) ring[i] = Math.random() * 2 - 1;
   for (let i = 0; i < n; i++) {
@@ -1239,9 +1765,9 @@ function ksBuffer(ac, freq, dur, damp, drive) {
     ring[j] = out;
   }
   if (drive) {
-    for (let i = 0; i < n; i++) data[i] = Math.tanh(data[i] * drive) / Math.tanh(drive);
+    const t = Math.tanh(drive);
+    for (let i = 0; i < n; i++) data[i] = Math.tanh(data[i] * drive) / t;
   }
-  // short release fade
   const fade = Math.min(n, Math.floor(sr * 0.02));
   for (let i = 0; i < fade; i++) data[n - 1 - i] *= i / fade;
   return buf;
@@ -1250,27 +1776,27 @@ function ksBuffer(ac, freq, dur, damp, drive) {
 function drumBuffer(ac, note) {
   const sr = ac.sampleRate;
   let dur = 0.2, gen;
-  if (note === 35 || note === 36) { // kicks
+  if (note === 35 || note === 36) {
     dur = 0.18;
     gen = t => Math.sin(2 * Math.PI * (50 + 90 * Math.exp(-t * 30)) * t) * Math.exp(-t * 16);
-  } else if (note === 38 || note === 40) { // snares
+  } else if (note === 38 || note === 40) {
     dur = 0.22;
     gen = t => (Math.random() * 2 - 1) * Math.exp(-t * 18) * 0.8 +
                Math.sin(2 * Math.PI * 190 * t) * Math.exp(-t * 30) * 0.5;
-  } else if (note === 42 || note === 44) { // closed/pedal hat
+  } else if (note === 42 || note === 44) {
     dur = 0.06;
     gen = t => (Math.random() * 2 - 1) * Math.exp(-t * 60);
-  } else if (note === 46) { // open hat
+  } else if (note === 46) {
     dur = 0.35;
     gen = t => (Math.random() * 2 - 1) * Math.exp(-t * 8);
-  } else if (note === 49 || note === 57 || note === 55 || note === 52) { // crashes
+  } else if (note === 49 || note === 57 || note === 55 || note === 52) {
     dur = 1.0;
     gen = t => (Math.random() * 2 - 1) * Math.exp(-t * 3);
-  } else if (note === 51 || note === 59 || note === 53) { // rides
+  } else if (note === 51 || note === 59 || note === 53) {
     dur = 0.5;
     gen = t => (Math.random() * 2 - 1) * Math.exp(-t * 7) * 0.6 +
                Math.sin(2 * Math.PI * 820 * t) * Math.exp(-t * 9) * 0.3;
-  } else if (note >= 41 && note <= 50) { // toms
+  } else if (note >= 41 && note <= 50) {
     dur = 0.25;
     const f0 = 80 + (note - 41) * 18;
     gen = t => Math.sin(2 * Math.PI * (f0 + 60 * Math.exp(-t * 25)) * t) * Math.exp(-t * 12);
@@ -1288,55 +1814,80 @@ function drumBuffer(ac, note) {
 const midiFreq = m => 440 * Math.pow(2, (m - 69) / 12);
 
 function instrumentTimbre(prog) {
-  // crude timbre families for the synth
-  if (prog >= 29 && prog <= 30) return { damp: 0.999, drive: 6 };   // overdrive/distortion
-  if (prog >= 32 && prog <= 39) return { damp: 0.997, drive: 0 };   // basses
-  if (prog >= 40 && prog <= 54) return { damp: 0.9993, drive: 0 };  // strings/voices
-  if (prog >= 88 && prog <= 95) return { damp: 0.9995, drive: 0 };  // pads
-  return { damp: 0.996, drive: 0 };                                  // guitars, default
+  if (prog >= 29 && prog <= 30) return { damp: 0.999, drive: 6 };
+  if (prog >= 32 && prog <= 39) return { damp: 0.997, drive: 0 };
+  if (prog >= 40 && prog <= 54) return { damp: 0.9993, drive: 0 };
+  if (prog >= 88 && prog <= 95) return { damp: 0.9995, drive: 0 };
+  return { damp: 0.996, drive: 0 };
 }
 
-function scheduleNote(ac, tr, dest, when, cell, str, sustainSpaces, spaceDur) {
-  const vol = (tr.volume / 127) * 0.8;
+const panNodes = new Map();
+function panNodeFor(ac, pan) {
+  const key = pan | 0;
+  let n = panNodes.get(key);
+  if (!n) {
+    if (ac.createStereoPanner) {
+      n = ac.createStereoPanner();
+      n.pan.value = (pan - 64) / 64;
+    } else n = ac.createGain();
+    n.connect(masterGain);
+    panNodes.set(key, n);
+  }
+  return n;
+}
+
+function scheduleNote(ac, tr, note, when, dur) {
+  const cell = note.cell;
+  const dest = panNodeFor(ac, note.pan);
+  const vol = (note.vol / 127) * 0.8;
   if (cell.fx === "x") {
-    // dead note: short damped pluck
     const buf = tr.isDrum ? drumBuffer(ac, 37)
-      : ksBuffer(ac, midiFreq(tr.tuning[str] + cell.f), 0.09, 0.92, 0);
+      : ksBuffer(ac, midiFreq(tr.tuning[note.s] + cell.f), 0.09, 0.92, 0);
     const src = ac.createBufferSource();
     src.buffer = buf;
-    const g = ac.createGain();
-    g.gain.value = vol * 0.7;
-    src.connect(g).connect(dest);
+    const gg = ac.createGain();
+    gg.gain.value = vol * 0.7;
+    src.connect(gg).connect(dest);
     src.start(when);
     return;
   }
   if (tr.isDrum) {
     const src = ac.createBufferSource();
-    src.buffer = drumBuffer(ac, Math.min(81, Math.max(35, tr.tuning[str] + cell.f)));
-    const g = ac.createGain();
-    g.gain.value = vol;
-    src.connect(g).connect(dest);
+    src.buffer = drumBuffer(ac, Math.min(81, Math.max(35, (tr.tuning[note.s] || 0) + cell.f)));
+    const gg = ac.createGain();
+    gg.gain.value = vol;
+    src.connect(gg).connect(dest);
     src.start(when);
     return;
   }
-  const pitch = tr.tuning[str] + cell.f;
-  const dur = Math.min(sustainSpaces * spaceDur + 0.25, 3.0);
-  const timbre = instrumentTimbre(tr.instrument);
+  const bendFactor = Math.pow(2, (note.bend / 8192) * 2 / 12);
+  let pitch = tr.tuning[note.s] + cell.f;
+  let freq = midiFreq(pitch) * bendFactor;
+  const timbre = instrumentTimbre(note.prog);
+  let damp = timbre.damp, drive = timbre.drive, gmul = 1;
+  if (cell.fx === "<") { freq *= 2; damp = Math.max(damp, 0.998); gmul = 0.8; }
+  if (cell.fx === "(") gmul = 0.5;
+  if (cell.fx === "s") drive = Math.max(drive, 4);
+  if (cell.fx === "h" || cell.fx === "p") gmul = 0.65;
   const src = ac.createBufferSource();
-  src.buffer = ksBuffer(ac, midiFreq(pitch), dur, timbre.damp, timbre.drive);
+  src.buffer = ksBuffer(ac, freq, Math.min(dur + 0.25, 3.0), damp, drive);
   const g = ac.createGain();
-  g.gain.value = vol * (cell.fx === "h" || cell.fx === "p" ? 0.65 : 1);
+  g.gain.value = vol * gmul;
   src.connect(g).connect(dest);
-  const st = 2 ** (2 / 12); // two-semitone interval for slides/bends
+  const st = 2 ** (2 / 12);
   switch (cell.fx) {
     case "/": src.playbackRate.setValueAtTime(1 / st, when);
-              src.playbackRate.exponentialRampToValueAtTime(1, when + Math.min(0.12, dur / 2)); break;
+              src.playbackRate.exponentialRampToValueAtTime(1, when + Math.min(0.12, dur / 2 + 0.02)); break;
     case "\\": src.playbackRate.setValueAtTime(1, when);
-               src.playbackRate.exponentialRampToValueAtTime(1 / st, when + dur * 0.8); break;
-    case "b": src.playbackRate.setValueAtTime(1, when);
-              src.playbackRate.exponentialRampToValueAtTime(st, when + Math.min(0.18, dur / 2)); break;
+               src.playbackRate.exponentialRampToValueAtTime(1 / st, when + Math.max(0.05, dur * 0.8)); break;
+    case "b": case "^":
+      src.playbackRate.setValueAtTime(1, when);
+      src.playbackRate.exponentialRampToValueAtTime(st, when + Math.min(0.18, dur / 2 + 0.02)); break;
     case "r": src.playbackRate.setValueAtTime(st, when);
-              src.playbackRate.exponentialRampToValueAtTime(1, when + Math.min(0.18, dur / 2)); break;
+              src.playbackRate.exponentialRampToValueAtTime(1, when + Math.min(0.18, dur / 2 + 0.02)); break;
+    case "w": src.playbackRate.setValueAtTime(1, when);
+              src.playbackRate.exponentialRampToValueAtTime(1 / st, when + Math.max(0.06, dur * 0.4));
+              src.playbackRate.exponentialRampToValueAtTime(1, when + Math.max(0.12, dur * 0.8)); break;
     case "~": {
       const lfo = ac.createOscillator();
       lfo.frequency.value = 5.5;
@@ -1344,7 +1895,17 @@ function scheduleNote(ac, tr, dest, when, cell, str, sustainSpaces, spaceDur) {
       lg.gain.value = 0.035;
       lfo.connect(lg).connect(src.playbackRate);
       lfo.start(when + 0.1);
-      lfo.stop(when + dur);
+      lfo.stop(when + dur + 0.2);
+      break;
+    }
+    case "{": {
+      const lfo = ac.createOscillator();
+      lfo.frequency.value = 9;
+      const lg = ac.createGain();
+      lg.gain.value = vol * gmul * 0.5;
+      lfo.connect(lg).connect(g.gain);
+      lfo.start(when);
+      lfo.stop(when + dur + 0.2);
       break;
     }
   }
@@ -1356,77 +1917,77 @@ function previewNote(tr, col, str) {
   try {
     const ac = audioCtx();
     const cell = getCell(tr, col, str);
-    if (!cell) return;
-    const pan = makePanNode(ac, tr.pan);
-    pan.connect(masterGain);
-    scheduleNote(ac, tr, pan, ac.currentTime, cell, str, 4, 60 / song.tempo / 4);
-    setTimeout(() => pan.disconnect(), 4000);
+    if (!cell || cell.fx === "*") return;
+    scheduleNote(ac, tr, { cell, s: str, vol: tr.volume, pan: tr.pan,
+      prog: tr.instrument, bend: tr.pitchBend || 0, strokeOff: 0 },
+      ac.currentTime, 60 / song.tempo);
   } catch (e) { /* audio unavailable */ }
-}
-
-function makePanNode(ac, pan127) {
-  if (ac.createStereoPanner) {
-    const p = ac.createStereoPanner();
-    p.pan.value = (pan127 - 64) / 64;
-    return p;
-  }
-  return ac.createGain();
 }
 
 function playFrom(col) {
   stopPlayback(true);
   const ac = audioCtx();
-  const spaceDur = 60 / song.tempo / 4;
-  const startCol = Math.min(col, songCols() - 1);
+  const perf = buildPerformance();
+  loopCol = col;
   playStartCol = cur.col;
-  playEndCol = songCols();
-  const t0 = ac.currentTime + 0.08;
-  playT0 = t0 - startCol * spaceDur;
 
-  for (const tr of song.tracks) {
-    const pan = makePanNode(ac, tr.pan);
-    pan.connect(masterGain);
-    const ns = tr.tuning.length;
-    for (let s = 0; s < ns; s++) {
-      for (let c = startCol; c < tr.spaces.length; c++) {
-        const cell = getCell(tr, c, s);
-        if (!cell) continue;
-        let end = Math.min(c + song.spacesPerBar * 2, playEndCol);
-        for (let c2 = c + 1; c2 < end; c2++) if (getCell(tr, c2, s)) { end = c2; break; }
-        scheduleNote(ac, tr, pan, playT0 + c * spaceDur, cell, s, end - c, spaceDur);
-      }
+  // start at the first performance step at/after the requested column
+  let startStep = perf.steps.find(s => s.col >= col) || perf.steps[0] || { pp: 0, col: 0 };
+  const tOffset = perf.secAt(startStep.pp);
+  const t0 = ac.currentTime + 0.1;
+  playT0 = t0 - tOffset;
+  playTotal = perf.totalSec;
+
+  for (const note of perf.notes) {
+    const tr = song.tracks[note.t];
+    if (!tr.played) continue;
+    // schedule every performance occurrence of this note
+    for (const seg of perf.segs) {
+      if (note.plain < seg.p0 - EPS || note.plain >= seg.p1 - EPS) continue;
+      const pp = seg.perfStart + (note.plain - seg.p0);
+      const start = perf.secAt(pp);
+      if (start < tOffset - 1e-4) continue;
+      const endPlain = Math.min(note.plainEnd, seg.p1);
+      const dur = Math.max(0.05, perf.secAt(pp + (endPlain - note.plain)) - start);
+      scheduleNote(ac, tr, note, playT0 + start + note.strokeOff, dur);
     }
   }
-  if (opts.metronome) {
-    const spb = song.spacesPerBar;
-    for (let c = startCol - (startCol % 4); c < playEndCol; c += 4) {
-      if (c < startCol) continue;
-      const osc = ac.createOscillator();
-      osc.frequency.value = c % spb === 0 ? 1700 : 1200;
-      const g = ac.createGain();
-      g.gain.setValueAtTime(0.12, playT0 + c * spaceDur);
-      g.gain.exponentialRampToValueAtTime(0.0001, playT0 + c * spaceDur + 0.04);
-      osc.connect(g).connect(masterGain);
-      osc.start(playT0 + c * spaceDur);
-      osc.stop(playT0 + c * spaceDur + 0.05);
-    }
+  const mv = (opts.metroVolume / 127) * 0.3;
+  for (const m of perf.metro) {
+    const start = perf.secAt(m.pp);
+    if (start < tOffset - 1e-4) continue;
+    const osc = ac.createOscillator();
+    osc.frequency.value = m.accent ? 1700 : 1200;
+    const g = ac.createGain();
+    g.gain.setValueAtTime(m.accent ? mv * 1.4 : mv, playT0 + start);
+    g.gain.exponentialRampToValueAtTime(0.0001, playT0 + start + 0.04);
+    osc.connect(g).connect(masterGain);
+    osc.start(playT0 + start);
+    osc.stop(playT0 + start + 0.05);
   }
 
+  // playhead steps in seconds
+  playSteps = perf.steps
+    .map(s => ({ sec: perf.secAt(s.pp), col: s.col }))
+    .filter(s => s.sec >= tOffset - 1e-4);
+  playStepIdx = 0;
   playing = true;
-  playCol = startCol;
+  playCol = startStep.col;
   updateStatus();
+
   const tick = () => {
     if (!playing) return;
-    const col = Math.floor((ac.currentTime - playT0) / spaceDur);
-    if (col >= playEndCol) {
-      if (opts.loop) { playFrom(startCol); return; }
+    const el = ac.currentTime - playT0;
+    if (el >= playTotal + 0.3) {
+      if (opts.loop) { playFrom(loopCol); return; }
       stopPlayback();
       return;
     }
-    if (col !== playCol && col >= 0) {
-      playCol = col;
+    while (playStepIdx < playSteps.length && playSteps[playStepIdx].sec <= el) {
+      playCol = playSteps[playStepIdx].col;
+      playStepIdx++;
       if (opts.followPlayback) {
-        const p = colToXY(Math.max(0, playCol), 0);
+        const p = colToXY(Math.max(0, Math.min(playCol, trackGeom(track()).cols - 1)), 0);
         if (p.y < pane.scrollTop || p.y + CH * nStrings() > pane.scrollTop + pane.clientHeight)
           pane.scrollTop = Math.max(0, p.y - CH * 2);
       }
@@ -1442,9 +2003,10 @@ function stopPlayback(silent) {
   const wasPlaying = playing;
   playing = false;
   playCol = -1;
+  playSteps = null;
   if (audio) {
-    // kill scheduled sound by rebuilding the master gain chain
     masterGain.disconnect();
+    panNodes.clear();
     masterGain = audio.createGain();
     masterGain.gain.value = 0.5;
     masterGain.connect(audio.destination);
@@ -1457,8 +2019,259 @@ function stopPlayback(silent) {
   }
 }
 
+/* ================= file operations ================= */
+
+function download(name, data, mime) {
+  const blob = data instanceof Blob ? data : new Blob([data], { type: mime || "application/octet-stream" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+}
+
+async function newSong() {
+  const v = await showDialog("TabIt", "Discard the current song and start a new one?", ["OK", "Cancel"]);
+  if (!v) return;
+  song = blankSong();
+  fileName = null;
+  curTrack = 0; cur = { col: 0, str: 0 }; selAnchor = null;
+  undoStack.length = 0; redoStack.length = 0;
+  invalidateGeom();
+  fullRedraw();
+}
+
+function saveSong() {
+  const base = (fileName || song.title || "Untitled").replace(/\.tabit\.json$|\.json$|\.tbt$/i, "");
+  download(base + ".tabit.json",
+    JSON.stringify({ format: "tabit-web-2", song }, stripPrivate, 1), "application/json");
+}
+
+function openSongDialog() {
+  document.getElementById("fileinput").click();
+}
+
+function migrateV1(s) {
+  // v1 files had a flat spacesPerBar instead of barLines
+  if (!s.barLines) {
+    const spb = s.spacesPerBar || 16;
+    const cols = Math.max(...s.tracks.map(t => t.spaces.length), spb);
+    s.barLines = [];
+    for (let i = 0; i < Math.ceil(cols / spb); i++)
+      s.barLines.push({ spaces: spb, open: false, close: false, double: false, repeat: 0 });
+  }
+  s.album = s.album || "";
+  s.transcribedBy = s.transcribedBy || "";
+  for (const t of s.tracks) {
+    t.fx = t.fx || {};
+    t.topText = t.topText || {};
+    t.botText = t.botText || {};
+    t.alt = t.alt || null;
+    t.reverb = t.reverb || 0;
+    t.chorus = t.chorus || 0;
+    t.cutAnyString = !!t.cutAnyString;
+    t.played = t.played !== false;
+  }
+  return s;
+}
+
+document.getElementById("fileinput").addEventListener("change", async e => {
+  const f = e.target.files[0];
+  e.target.value = "";
+  if (!f) return;
+  try {
+    const buf = await f.arrayBuffer();
+    const head = new Uint8Array(buf.slice(0, 3));
+    if (head[0] === 0x54 && head[1] === 0x42 && head[2] === 0x54) {
+      const result = await TBT.parse(buf);
+      song = migrateV1(result.song);
+      if (result.warnings.length) msgBox("TabIt", result.warnings.join("\n"));
+    } else {
+      const data = JSON.parse(new TextDecoder().decode(buf));
+      if (!(data.format === "tabit-web-1" || data.format === "tabit-web-2") ||
+          !data.song || !Array.isArray(data.song.tracks))
+        throw new Error("incompatible version");
+      song = migrateV1(data.song);
+    }
+    fileName = f.name.replace(/\.tabit\.json$|\.json$|\.tbt$/i, "");
+    curTrack = 0; cur = { col: 0, str: 0 }; selAnchor = null;
+    undoStack.length = 0; redoStack.length = 0;
+    invalidateGeom();
+    pane.scrollTop = 0;
+    fullRedraw();
+  } catch (err) {
+    msgBox("TabIt", "File \"" + f.name + "\" could not be opened:\n" + err.message);
+  }
+});
+
+/* ---- text export (classic ASCII tab, variable column width) ---- */
+
+function buildText() {
+  const lines = [];
+  lines.push(song.title + (song.artist ? " - " + song.artist : ""));
+  if (song.album) lines.push("Album: " + song.album);
+  if (song.transcribedBy) lines.push("Transcribed by: " + song.transcribedBy);
+  lines.push("Tempo: " + song.tempo);
+  if (song.comments) lines.push(song.comments);
+  lines.push("");
+  for (const tr of song.tracks) {
+    const g = trackGeom(tr);
+    lines.push(tr.name + " (" + (tr.isDrum ? "Drums - " + DRUM_KITS[tr.drumKit] : GM_INSTRUMENTS[tr.instrument]) + ")");
+    const ns = tr.tuning.length;
+    const barsPerLine = 4;
+    for (let lineStart = 0; lineStart < g.bars.length; lineStart += barsPerLine) {
+      const rows = [];
+      for (let s = 0; s < ns; s++) {
+        let label = tr.isDrum ? "D" : NOTE_NAMES[((tr.tuning[s] % 12) + 12) % 12];
+        if (s === 0 && !tr.isDrum) label = label.toLowerCase();
+        rows.push(label.padEnd(2) + "|");
+      }
+      for (let k = lineStart; k < Math.min(lineStart + barsPerLine, g.bars.length); k++) {
+        const b = g.bars[k];
+        for (let c = b.start; c < b.start + b.cols; c++) {
+          const sp = c < tr.spaces.length ? tr.spaces[c] : null;
+          let w = 1;
+          if (sp) for (const cell of sp) {
+            if (!cell) continue;
+            const t = cellText(cell);
+            w = Math.max(w, t.length);
+          }
+          for (let s = 0; s < ns; s++) {
+            const cell = sp ? sp[s] : null;
+            rows[s] += (cell ? cellText(cell) : "").padEnd(w, "-");
+          }
+        }
+        for (let s = 0; s < ns; s++) rows[s] += "|";
+        if (bars()[k].close) for (let s = 0; s < ns; s++) rows[s] += "|";
+      }
+      lines.push(...rows, "");
+    }
+    lines.push("");
+  }
+  lines.push("Generated by TabIt Web (tribute to TabIt 2.03)");
+  return lines.join("\r\n");
+}
+
+function cellText(cell) {
+  if (cell.fx === "x") return "x";
+  if (cell.fx === "*") return "*";
+  return String(cell.f) + (cell.fx || "");
+}
+
+function exportText() {
+  download((song.title || "Untitled") + ".txt", buildText(), "text/plain");
+}
+
+/* ---- print preview ---- */
+
+function printPreview() {
+  let area = document.getElementById("printarea");
+  if (!area) {
+    area = document.createElement("div");
+    area.id = "printarea";
+    document.body.appendChild(area);
+  }
+  area.innerHTML = "<pre>" + buildText().replace(/&/g, "&amp;").replace(/</g, "&lt;") + "</pre>";
+  showDialog("Print Preview",
+    "<pre style='max-height:340px'>" + buildText().replace(/&/g, "&amp;").replace(/</g, "&lt;") + "</pre>",
+    ["Print", "Close"]).then(v => {
+    if (v) window.print();
+  });
+}
+
+/* ---- MIDI export ---- */
+
+function exportMidi() {
+  const TPQN = 480, TICKS_PER_PLAIN = TPQN / 4;
+  const perf = buildPerformance();
+  const tk = pp => Math.max(0, Math.round(pp * TICKS_PER_PLAIN));
+  const vlq = n => {
+    const out = [n & 0x7f];
+    while ((n >>= 7)) out.unshift((n & 0x7f) | 0x80);
+    return out;
+  };
+  const str2bytes = s => Array.from(s, c => c.charCodeAt(0) & 0xff);
+  const trackChunk = events => {
+    events.sort((a, b) => a[0] - b[0] || a[2] - b[2]);
+    const data = [];
+    let last = 0;
+    for (const [tick, bytes] of events) {
+      data.push(...vlq(tick - last), ...bytes);
+      last = tick;
+    }
+    data.push(...vlq(0), 0xff, 0x2f, 0x00);
+    return [0x4d, 0x54, 0x72, 0x6b,
+      (data.length >>> 24) & 255, (data.length >>> 16) & 255,
+      (data.length >>> 8) & 255, data.length & 255, ...data];
+  };
+
+  const chunks = [];
+  const tempoEv = perf.breaks.map(b => {
+    const us = Math.round(60000000 / b.bpm);
+    return [tk(b.pp), [0xff, 0x51, 0x03, (us >> 16) & 255, (us >> 8) & 255, us & 255], 0];
+  });
+  tempoEv.push([0, [0xff, 0x03, Math.min(127, song.title.length), ...str2bytes(song.title)], 0]);
+  chunks.push(trackChunk(tempoEv));
+
+  let chan = 0;
+  song.tracks.forEach((tr, t) => {
+    let ch = tr.isDrum ? 9 : chan;
+    if (!tr.isDrum) { chan++; if (chan === 9) chan++; chan %= 16; }
+    const ev = [];
+    let seq = 0;
+    const push = (tick, bytes) => ev.push([tick, bytes, seq++]);
+    push(0, [0xff, 0x03, Math.min(127, tr.name.length), ...str2bytes(tr.name)]);
+    if (!tr.isDrum) push(0, [0xc0 | ch, tr.instrument & 127]);
+    push(0, [0xb0 | ch, 7, tr.volume & 127]);
+    push(0, [0xb0 | ch, 10, tr.pan & 127]);
+    push(0, [0xb0 | ch, 91, (tr.reverb || 0) & 127]);
+    push(0, [0xb0 | ch, 93, (tr.chorus || 0) & 127]);
+    // effect changes at every performance occurrence
+    const g = perf.geoms[t];
+    for (const k of Object.keys(tr.fx || {})) {
+      const fx = tr.fx[k];
+      const plain = g.plainStart[Math.min(Number(k), g.cols)];
+      for (const seg of perf.segs) {
+        if (plain < seg.p0 - EPS || plain >= seg.p1 - EPS) continue;
+        const tick = tk(seg.perfStart + (plain - seg.p0));
+        if (fx.t === TFX.VOLUME) push(tick, [0xb0 | ch, 7, fx.v & 127]);
+        else if (fx.t === TFX.PAN) push(tick, [0xb0 | ch, 10, fx.v & 127]);
+        else if (fx.t === TFX.CHORUS) push(tick, [0xb0 | ch, 93, fx.v & 127]);
+        else if (fx.t === TFX.REVERB) push(tick, [0xb0 | ch, 91, fx.v & 127]);
+        else if (fx.t === TFX.MODULATION) push(tick, [0xb0 | ch, 1, fx.v & 127]);
+        else if (fx.t === TFX.INSTRUMENT && !tr.isDrum) push(tick, [0xc0 | ch, fx.v & 127]);
+        else if (fx.t === TFX.PITCH_BEND) {
+          const b14 = Math.max(0, Math.min(16383, fx.v + 8192));
+          push(tick, [0xe0 | ch, b14 & 0x7f, (b14 >> 7) & 0x7f]);
+        }
+      }
+    }
+    for (const note of perf.notes) {
+      if (note.t !== t || note.cell.fx === "x") continue;
+      const pitch = tr.isDrum ? Math.min(127, Math.max(0, note.cell.f))
+        : Math.min(127, Math.max(0, tr.tuning[note.s] + note.cell.f));
+      for (const seg of perf.segs) {
+        if (note.plain < seg.p0 - EPS || note.plain >= seg.p1 - EPS) continue;
+        const on = tk(seg.perfStart + (note.plain - seg.p0)) + (note.strokeOff ? Math.round(note.strokeOff * 100) : 0);
+        const off = Math.max(on + 1, tk(seg.perfStart + (Math.min(note.plainEnd, seg.p1) - seg.p0)));
+        push(on, [0x90 | ch, pitch, 96]);
+        push(off, [0x80 | ch, pitch, 0]);
+      }
+    }
+    chunks.push(trackChunk(ev));
+  });
+
+  const nTracks = chunks.length;
+  const header = [0x4d, 0x54, 0x68, 0x64, 0, 0, 0, 6, 0, 1,
+    (nTracks >> 8) & 255, nTracks & 255, (TPQN >> 8) & 255, TPQN & 255];
+  const bytes = new Uint8Array([...header, ...chunks.flat()]);
+  download((song.title || "Untitled") + ".mid", new Blob([bytes], { type: "audio/midi" }));
+}
+
 /* ================= boot ================= */
 
+loadPrefs();
+applyFontSize();
 buildMenuBar();
 setInterval(() => {
   if (opts.caretBlink && !playing && document.getElementById("dialoglayer").hidden) {
