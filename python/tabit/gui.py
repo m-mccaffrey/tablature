@@ -21,9 +21,10 @@ from .model import (blank_song, demo_song, make_bar, make_track, migrate,
                     get_cell, set_cell, track_geom, bar_of_col, normalize_bars,
                     track_insert_cols, track_remove_cols)
 from . import tbtfile
-from .exporters import build_text, build_midi
+from .exporters import build_text, build_midi, realtime_events
 from .performance import build_performance
 from . import audio
+from . import midiplayer
 
 PREFS_PATH = os.path.expanduser("~/.config/tabit-py.json")
 
@@ -66,11 +67,12 @@ class App:
         self.play_idx = 0
         self.play_start_col = 0
         self.player = audio.Player()
+        self.midi_player = midiplayer.MidiPlayer()
         self.opts = {
             "barNumbers": True, "caretBlink": True, "followPlayback": True,
             "rewindAfterStop": True, "metronome": False, "metroVolume": 80,
             "metroAccent": True, "loop": False, "fontSize": "Medium",
-            "previewNotes": False,
+            "previewNotes": False, "playbackMode": "midi",
         }
         self.colors = dict(DEFAULT_COLORS)
         self.user_tunings = {}
@@ -745,29 +747,53 @@ class App:
         if start_step is None:
             return
         t_off = perf["secAt"](start_step["pp"])
+
+        if self.opts.get("playbackMode", "midi") == "midi":
+            backend = midiplayer.detect_backend()
+            if backend is None:
+                messagebox.showerror("TabIt", midiplayer.backend_help())
+                return
+            try:
+                if backend == "rtmidi":
+                    self.midi_player.play_events(realtime_events(self.song, perf), t_off)
+                else:
+                    start_pp = start_step["pp"]
+                    data = build_midi(self.song, perf, shift_pp=start_pp,
+                                      respect_mute=True)
+                    self.midi_player.play_file(data, backend)
+            except Exception as exc:
+                messagebox.showerror("TabIt", "Error during playback:\n\n%s" % exc)
+                return
+            self._start_clock(perf, t_off)
+            return
+
+        # synthesized (hi-fi) mode
         self.st_mode.config(text="Rendering...")
         self.root.update_idletasks()
 
         def render():
             try:
-                wav, dur = audio.render_performance(perf, self.song, t_off)
+                wav, _dur = audio.render_performance(perf, self.song, t_off)
             except Exception as exc:  # pragma: no cover
                 self.root.after(0, lambda: messagebox.showerror(
                     "TabIt", "Error during playback:\n\n%s" % exc))
                 return
-            self.root.after(0, lambda: self._start_playback(perf, t_off, wav, dur))
+            self.root.after(0, lambda: self._start_playback(perf, t_off, wav))
 
         threading.Thread(target=render, daemon=True).start()
 
-    def _start_playback(self, perf, t_off, wav, dur):
+    def _start_playback(self, perf, t_off, wav):
         try:
             self.player.play(wav)
         except RuntimeError as exc:
             messagebox.showerror("TabIt", str(exc))
             return
+        self._start_clock(perf, t_off)
+
+    def _start_clock(self, perf, t_off):
         import time
         self.playing = True
-        self._t0 = time.monotonic() - 0.0
+        self._t0 = time.monotonic()
         self.play_steps = [{"sec": perf["secAt"](s["pp"]) - t_off, "col": s["col"]}
                            for s in perf["steps"] if perf["secAt"](s["pp"]) >= t_off - 1e-4]
         self._play_dur = perf["totalSec"] - t_off
@@ -804,6 +830,7 @@ class App:
         was = self.playing
         self.playing = False
         self.player.stop()
+        self.midi_player.stop()
         if was and not silent:
             if self.opts["rewindAfterStop"]:
                 self.col = self.play_start_col
@@ -824,6 +851,7 @@ class App:
         fm.add_separator()
         fm.add_command(label="Export Text...", command=self.export_text)
         fm.add_command(label="Export MIDI...", command=self.export_midi)
+        fm.add_command(label="Export Audio (WAV/MP3)...", command=self.export_audio)
         fm.add_separator()
         fm.add_command(label="Song Properties...", command=self.song_props)
         fm.add_separator()
@@ -941,6 +969,13 @@ class App:
         pm.add_separator()
         pm.add_command(label="Tracks...", command=self.player_tracks)
         pm.add_separator()
+        mode = self.opts.get("playbackMode", "midi")
+        for value, label in (("midi", "MIDI Playback"),
+                             ("synth", "Synthesized Playback (Hi-Fi)")):
+            pm.add_radiobutton(label=label, value=value,
+                               variable=tk.StringVar(value=mode),
+                               command=lambda value=value: self.set_playback_mode(value))
+        pm.add_separator()
         for key, label in (("loop", "Loop"), ("metronome", "Metronome")):
             pm.add_checkbutton(label=label, variable=tk.IntVar(value=1 if self.opts[key] else 0),
                                command=lambda key=key: self.toggle_opt(key))
@@ -970,6 +1005,10 @@ class App:
         self.opts[key] = not self.opts[key]
         self.save_prefs()
         self.redraw()
+
+    def set_playback_mode(self, mode):
+        self.opts["playbackMode"] = mode
+        self.save_prefs()
 
     def set_font(self, sz):
         self.opts["fontSize"] = sz
@@ -1504,6 +1543,52 @@ class App:
             return
         with open(path, "wb") as f:
             f.write(build_midi(self.song))
+
+    def export_audio(self):
+        import shutil as _shutil
+        have_ffmpeg = bool(_shutil.which("ffmpeg"))
+        types = [("WAV audio", "*.wav")]
+        if have_ffmpeg:
+            types.insert(0, ("MP3 audio", "*.mp3"))
+        path = filedialog.asksaveasfilename(
+            parent=self.root, title="Export Audio (high quality render)",
+            initialfile=(self.song["title"] or "Untitled") +
+                        (".mp3" if have_ffmpeg else ".wav"),
+            defaultextension=".mp3" if have_ffmpeg else ".wav", filetypes=types)
+        if not path:
+            return
+        if path.lower().endswith(".mp3") and not have_ffmpeg:
+            messagebox.showerror("TabIt", "MP3 export needs ffmpeg installed; "
+                                          "exporting WAV instead.")
+            path = path[:-4] + ".wav"
+        self.st_mode.config(text="Rendering...")
+        self.root.update_idletasks()
+
+        def render():
+            try:
+                perf = build_performance(self.song, self.cur_track,
+                                         self.opts["metronome"], self.opts["metroAccent"])
+                wav, _dur = audio.render_performance(perf, self.song, 0.0)
+                if path.lower().endswith(".mp3"):
+                    import subprocess, tempfile
+                    fd, tmp = tempfile.mkstemp(suffix=".wav", prefix="tabit-")
+                    with os.fdopen(fd, "wb") as f:
+                        f.write(wav)
+                    try:
+                        subprocess.run(["ffmpeg", "-y", "-loglevel", "quiet",
+                                        "-i", tmp, "-b:a", "192k", path], check=True)
+                    finally:
+                        os.unlink(tmp)
+                else:
+                    with open(path, "wb") as f:
+                        f.write(wav)
+                self.root.after(0, lambda: self.st_mode.config(
+                    text="Exported %s" % os.path.basename(path)))
+            except Exception as exc:
+                self.root.after(0, lambda exc=exc: messagebox.showerror(
+                    "TabIt", "Audio export failed:\n%s" % exc))
+
+        threading.Thread(target=render, daemon=True).start()
 
     def on_quit(self):
         self.stop(silent=True)

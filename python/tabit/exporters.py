@@ -1,10 +1,14 @@
-"""Text and MIDI exporters."""
+"""Text and MIDI exporters, plus the shared MIDI event stream used for
+real-time MIDI playback."""
 
 from .constants import (GM_INSTRUMENTS, DRUM_KITS, NOTE_NAMES,
                         TFX_VOLUME, TFX_PAN, TFX_CHORUS, TFX_REVERB,
                         TFX_MODULATION, TFX_INSTRUMENT, TFX_PITCH_BEND)
 from .model import EPS, track_geom, cell_text
 from .performance import build_performance
+
+TPQN = 480
+TICKS_PER_PLAIN = TPQN // 4
 
 
 def build_text(song):
@@ -56,6 +60,90 @@ def build_text(song):
     return "\r\n".join(lines)
 
 
+def midi_channels(song):
+    """Channel assignment per track (drums on 9)."""
+    chan = 0
+    out = []
+    for tr in song["tracks"]:
+        if tr["isDrum"]:
+            out.append(9)
+        else:
+            out.append(chan)
+            chan += 1
+            if chan == 9:
+                chan += 1
+            chan %= 16
+    return out
+
+
+def midi_track_events(song, perf, t):
+    """Channel events for track t as (pp, stroke_sec, msg_bytes, seq).
+
+    pp is the performance position in plain-space units; stroke_sec is an
+    extra real-time offset for arpeggiated strokes. Meta events (track
+    name) use msg[0] == 0xFF.
+    """
+    tr = song["tracks"][t]
+    ch = midi_channels(song)[t]
+    ev = []
+    seq = 0
+
+    def push(pp, stroke, data):
+        nonlocal seq
+        ev.append((pp, stroke, data, seq))
+        seq += 1
+
+    tname = tr["name"].encode("latin-1", "replace")[:127]
+    push(0.0, 0.0, bytes([0xFF, 0x03, len(tname)]) + tname)
+    if not tr["isDrum"]:
+        push(0.0, 0.0, bytes([0xC0 | ch, tr["instrument"] & 127]))
+    push(0.0, 0.0, bytes([0xB0 | ch, 7, tr["volume"] & 127]))
+    push(0.0, 0.0, bytes([0xB0 | ch, 10, tr["pan"] & 127]))
+    push(0.0, 0.0, bytes([0xB0 | ch, 91, tr.get("reverb", 0) & 127]))
+    push(0.0, 0.0, bytes([0xB0 | ch, 93, tr.get("chorus", 0) & 127]))
+
+    g = perf["geoms"][t]
+    for k, fx in (tr.get("fx") or {}).items():
+        plain = g["plainStart"][min(int(k), g["cols"])]
+        for s in perf["segs"]:
+            if not (s["p0"] - EPS <= plain < s["p1"] - EPS):
+                continue
+            pp = s["perfStart"] + (plain - s["p0"])
+            ft, v = fx["t"], fx["v"]
+            if ft == TFX_VOLUME:
+                push(pp, 0.0, bytes([0xB0 | ch, 7, v & 127]))
+            elif ft == TFX_PAN:
+                push(pp, 0.0, bytes([0xB0 | ch, 10, v & 127]))
+            elif ft == TFX_CHORUS:
+                push(pp, 0.0, bytes([0xB0 | ch, 93, v & 127]))
+            elif ft == TFX_REVERB:
+                push(pp, 0.0, bytes([0xB0 | ch, 91, v & 127]))
+            elif ft == TFX_MODULATION:
+                push(pp, 0.0, bytes([0xB0 | ch, 1, v & 127]))
+            elif ft == TFX_INSTRUMENT and not tr["isDrum"]:
+                push(pp, 0.0, bytes([0xC0 | ch, v & 127]))
+            elif ft == TFX_PITCH_BEND:
+                b14 = max(0, min(16383, v + 8192))
+                push(pp, 0.0, bytes([0xE0 | ch, b14 & 0x7F, (b14 >> 7) & 0x7F]))
+
+    for note in perf["notes"]:
+        if note["t"] != t or note["cell"]["fx"] == "x":
+            continue
+        if tr["isDrum"]:
+            pitch = max(0, min(127, note["cell"]["f"]))
+        else:
+            pitch = max(0, min(127, tr["tuning"][note["s"]] + note["cell"]["f"]))
+        for s in perf["segs"]:
+            if not (s["p0"] - EPS <= note["plain"] < s["p1"] - EPS):
+                continue
+            on_pp = s["perfStart"] + (note["plain"] - s["p0"])
+            off_pp = s["perfStart"] + (min(note["plainEnd"], s["p1"]) - s["p0"])
+            push(on_pp, note["strokeOff"], bytes([0x90 | ch, pitch, 96]))
+            push(max(off_pp, on_pp + 1e-3), note["strokeOff"],
+                 bytes([0x80 | ch, pitch, 0]))
+    return ev
+
+
 def _vlq(n):
     out = [n & 0x7F]
     n >>= 7
@@ -78,93 +166,68 @@ def _track_chunk(events):
     return b"MTrk" + len(data).to_bytes(4, "big") + bytes(data)
 
 
-def build_midi(song):
-    TPQN = 480
-    ticks_per_plain = TPQN // 4
-    perf = build_performance(song)
+def _is_state_msg(msg):
+    return msg[0] == 0xFF or (msg[0] & 0xF0) in (0xB0, 0xC0, 0xE0)
+
+
+def build_midi(song, perf=None, shift_pp=0.0, respect_mute=False):
+    """Build a standard MIDI file. With shift_pp the file starts at that
+    performance position; state changes (program/CC/bend/tempo) from
+    before the start point are emitted at tick 0 so playback begins with
+    the right sounds. respect_mute drops unchecked player tracks (used
+    for playback, not for export)."""
+    if perf is None:
+        perf = build_performance(song)
 
     def tk(pp):
-        return max(0, round(pp * ticks_per_plain))
+        return max(0, round((pp - shift_pp) * TICKS_PER_PLAIN))
 
     chunks = []
     tempo_ev = []
     seq = 0
+    last_before = None
     for b in perf["breaks"]:
         us = round(60000000 / b["bpm"])
-        tempo_ev.append((tk(b["pp"]), bytes([0xFF, 0x51, 0x03]) + us.to_bytes(3, "big"), seq))
-        seq += 1
+        meta = bytes([0xFF, 0x51, 0x03]) + us.to_bytes(3, "big")
+        if b["pp"] < shift_pp - EPS:
+            last_before = meta
+        else:
+            tempo_ev.append((tk(b["pp"]), meta, seq))
+            seq += 1
+    if last_before is not None:
+        tempo_ev.append((0, last_before, -1))
     name = song["title"].encode("latin-1", "replace")[:127]
-    tempo_ev.append((0, bytes([0xFF, 0x03, len(name)]) + name, seq))
+    tempo_ev.append((0, bytes([0xFF, 0x03, len(name)]) + name, -2))
     chunks.append(_track_chunk(tempo_ev))
 
-    chan = 0
-    for t, tr in enumerate(song["tracks"]):
-        ch = 9 if tr["isDrum"] else chan
-        if not tr["isDrum"]:
-            chan += 1
-            if chan == 9:
-                chan += 1
-            chan %= 16
+    for t in range(len(song["tracks"])):
         ev = []
-        seq = 0
-
-        def push(tick, data):
-            nonlocal seq
-            ev.append((tick, data, seq))
-            seq += 1
-
-        tname = tr["name"].encode("latin-1", "replace")[:127]
-        push(0, bytes([0xFF, 0x03, len(tname)]) + tname)
-        if not tr["isDrum"]:
-            push(0, bytes([0xC0 | ch, tr["instrument"] & 127]))
-        push(0, bytes([0xB0 | ch, 7, tr["volume"] & 127]))
-        push(0, bytes([0xB0 | ch, 10, tr["pan"] & 127]))
-        push(0, bytes([0xB0 | ch, 91, tr.get("reverb", 0) & 127]))
-        push(0, bytes([0xB0 | ch, 93, tr.get("chorus", 0) & 127]))
-
-        g = perf["geoms"][t]
-        for k, fx in (tr.get("fx") or {}).items():
-            plain = g["plainStart"][min(int(k), g["cols"])]
-            for s in perf["segs"]:
-                if not (s["p0"] - EPS <= plain < s["p1"] - EPS):
-                    continue
-                tick = tk(s["perfStart"] + (plain - s["p0"]))
-                ft, v = fx["t"], fx["v"]
-                if ft == TFX_VOLUME:
-                    push(tick, bytes([0xB0 | ch, 7, v & 127]))
-                elif ft == TFX_PAN:
-                    push(tick, bytes([0xB0 | ch, 10, v & 127]))
-                elif ft == TFX_CHORUS:
-                    push(tick, bytes([0xB0 | ch, 93, v & 127]))
-                elif ft == TFX_REVERB:
-                    push(tick, bytes([0xB0 | ch, 91, v & 127]))
-                elif ft == TFX_MODULATION:
-                    push(tick, bytes([0xB0 | ch, 1, v & 127]))
-                elif ft == TFX_INSTRUMENT and not tr["isDrum"]:
-                    push(tick, bytes([0xC0 | ch, v & 127]))
-                elif ft == TFX_PITCH_BEND:
-                    b14 = max(0, min(16383, v + 8192))
-                    push(tick, bytes([0xE0 | ch, b14 & 0x7F, (b14 >> 7) & 0x7F]))
-
-        for note in perf["notes"]:
-            if note["t"] != t or note["cell"]["fx"] == "x":
+        muted = respect_mute and not song["tracks"][t].get("played", True)
+        for pp, stroke, msg, seq in midi_track_events(song, perf, t):
+            if muted and not _is_state_msg(msg):
                 continue
-            if tr["isDrum"]:
-                pitch = max(0, min(127, note["cell"]["f"]))
-            else:
-                pitch = max(0, min(127, tr["tuning"][note["s"]] + note["cell"]["f"]))
-            for s in perf["segs"]:
-                if not (s["p0"] - EPS <= note["plain"] < s["p1"] - EPS):
-                    continue
-                on = tk(s["perfStart"] + (note["plain"] - s["p0"]))
-                if note["strokeOff"]:
-                    on += round(note["strokeOff"] * 100)
-                off = max(on + 1, tk(s["perfStart"] +
-                                     (min(note["plainEnd"], s["p1"]) - s["p0"])))
-                push(on, bytes([0x90 | ch, pitch, 96]))
-                push(off, bytes([0x80 | ch, pitch, 0]))
+            if pp < shift_pp - EPS:
+                if _is_state_msg(msg):
+                    ev.append((0, msg, seq))
+                continue
+            ev.append((tk(pp) + round(stroke * 100), msg, seq))
         chunks.append(_track_chunk(ev))
 
     header = b"MThd" + (6).to_bytes(4, "big") + (1).to_bytes(2, "big") \
         + len(chunks).to_bytes(2, "big") + TPQN.to_bytes(2, "big")
     return header + b"".join(chunks)
+
+
+def realtime_events(song, perf):
+    """All channel events as (sec, msg_bytes) sorted, for live MIDI out."""
+    evs = []
+    sec_at = perf["secAt"]
+    for t in range(len(song["tracks"])):
+        if not song["tracks"][t].get("played", True):
+            continue
+        for pp, stroke, msg, seq in midi_track_events(song, perf, t):
+            if msg[0] == 0xFF:
+                continue
+            evs.append((sec_at(pp) + stroke, msg, seq))
+    evs.sort(key=lambda e: (e[0], e[2]))
+    return [(sec, msg) for sec, msg, _ in evs]
