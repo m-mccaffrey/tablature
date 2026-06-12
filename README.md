@@ -1,11 +1,17 @@
-# TabIt Web
+# TabIt Web & TabIt Py
 
-An unofficial, browser-based tribute to **TabIt 2.03**, the classic Windows
-guitar tablature editor by GTAB Software (long defunct). It recreates the
-look and feel of the original — the Windows 9x chrome, the monospace tab
-grid with a block cursor, keyboard-driven fret entry, and multitrack
-playback — as a single static page that runs on GitHub Pages with no build
-step and no dependencies.
+An unofficial tribute to **TabIt 2.03**, the classic Windows guitar
+tablature editor by GTAB Software (long defunct), in two flavors that
+share the same song format:
+
+- **TabIt Web** (`docs/`) — a single static page that runs on GitHub
+  Pages with no build step and no dependencies, recreating the Windows 9x
+  chrome, the monospace tab grid with a block cursor, keyboard-driven
+  fret entry, and multitrack playback.
+- **TabIt Py** (`python/`) — a native desktop port in Python/tkinter
+  with the same editor, `.tbt` import, playback, and exporters. See
+  [python/README.md](python/README.md). Run it with
+  `cd python && python3 -m tabit`.
 
 The recreation was informed by a Ghidra analysis of the original
 `TabIt.exe` (see `tab.html`): the General MIDI instrument names, tuning
@@ -75,6 +81,7 @@ Feature highlights, all in the menus:
 ## What's here
 
 - `docs/` — the web app (plain HTML/CSS/JS, no build step)
+- `python/` — the desktop app (Python/tkinter, stdlib-only core)
 - `docs/tbt.js` — reader for the original binary `.tbt` file format, based
   on the public reverse-engineering documentation
   ([bostick/tabit-file-format](https://github.com/bostick/tabit-file-format))
