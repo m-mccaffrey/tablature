@@ -75,6 +75,7 @@ class App:
             "rewindAfterStop": True, "metronome": False, "metroVolume": 80,
             "metroAccent": True, "loop": False, "fontSize": "Medium",
             "previewNotes": False, "playbackMode": "midi", "midiBackend": "auto",
+            "viewMode": "all",
         }
         self.colors = dict(DEFAULT_COLORS)
         self.user_tunings = {}
@@ -195,11 +196,25 @@ class App:
 
     # ---------- layout / drawing ----------
 
+    def track_blocks(self):
+        """Tracks to display, top to bottom, as (track_index, n_strings).
+        All tracks in 'all' view; just the current one in 'single' view."""
+        if self.opts.get("viewMode", "all") == "single":
+            return [(self.cur_track, self.n_strings())]
+        return [(t, len(tr["tuning"])) for t, tr in enumerate(self.song["tracks"])]
+
     def layout(self):
         cw, ch, _, _ = self.metrics()
         g = self.geom()
         limit = max(300, self.canvas.winfo_width() - 24)
-        row_h = (self.n_strings() + 3) * ch  # marker row + staff + bottom padding
+        # Vertical: stack each track block (marker row + staff + bottom row).
+        blocks = self.track_blocks()
+        block_off, cum = {}, 0
+        for t, ns_t in blocks:
+            block_off[t] = cum + 1            # +1: marker row above the staff
+            cum += ns_t + 2                   # marker + staff + bottom/gap
+        sys_h = (cum + 1) * ch                # +1 ch gap between systems
+        # Horizontal: wrap bars into rows (identical for every track).
         bar_pos = []
         x, row = LEFT_PAD, 0
         for b in g["bars"]:
@@ -209,23 +224,31 @@ class App:
                 x = LEFT_PAD
             bar_pos.append((row, x))
             x += w
-        return g, bar_pos, row_h, row + 1
+        return g, bar_pos, sys_h, row + 1, blocks, block_off
 
-    def col_to_xy(self, col, st, lay=None):
+    def col_to_xy(self, col, st, lay=None, track=None):
         cw, ch, _, _ = self.metrics()
-        g, bar_pos, row_h, _ = lay or self.layout()
+        g, bar_pos, sys_h, _, _, block_off = lay or self.layout()
+        if track is None:
+            track = self.cur_track
         k = bar_of_col(g, min(col, g["cols"] - 1))
         row, bx = bar_pos[k]
         x = bx + cw + (col - g["bars"][k]["start"]) * cw
-        y = TOP_PAD + row * row_h + ch + st * ch
+        y = TOP_PAD + row * sys_h + block_off.get(track, 1) * ch + st * ch
         return x, y, k
 
     def xy_to_col(self, px, py):
         cw, ch, _, _ = self.metrics()
-        g, bar_pos, row_h, rows = self.layout()
-        row = max(0, min(rows - 1, int((py - TOP_PAD) / row_h)))
-        st = int((py - TOP_PAD - row * row_h - ch) / ch)
-        st = max(0, min(self.n_strings() - 1, st))
+        g, bar_pos, sys_h, rows, blocks, block_off = self.layout()
+        row = max(0, min(rows - 1, int((py - TOP_PAD) / sys_h)))
+        sys_rel = py - TOP_PAD - row * sys_h
+        target_t, target_ns = blocks[-1]
+        for t, ns_t in blocks:
+            if sys_rel < (block_off[t] + ns_t + 1) * ch:
+                target_t, target_ns = t, ns_t
+                break
+        st = int((sys_rel - block_off[target_t] * ch) / ch)
+        st = max(0, min(target_ns - 1, st))
         best = None
         for k, (r, bx) in enumerate(bar_pos):
             if r != row:
@@ -233,10 +256,10 @@ class App:
             if best is None or px >= bx:
                 best = k
         if best is None:
-            return 0, st
+            return 0, st, target_t
         b = g["bars"][best]
         in_bar = max(0, min(b["cols"] - 1, int((px - bar_pos[best][1]) / cw) - 1))
-        return min(b["start"] + in_bar, g["cols"] - 1), st
+        return min(b["start"] + in_bar, g["cols"] - 1), st, target_t
 
     def redraw(self):
         normalize_bars(self.song)
@@ -244,87 +267,94 @@ class App:
         c = self.canvas
         c.delete("all")
         cw, ch, font, font_s = self.metrics()
-        tr = self.track()
-        ns = self.n_strings()
-        bl = self.song["barLines"]
+        song = self.song
+        bl = song["barLines"]
         lay = self.layout()
-        g, bar_pos, row_h, rows = lay
+        g, bar_pos, sys_h, rows, blocks, block_off = lay
         C = self.colors
         c.configure(bg=C["bg"])
+        cur_ns = self.n_strings()
+        top_t = blocks[0][0]
 
+        # selection / playhead highlight (current track's staff only)
         sel = self.selection()
         if sel:
             for cc in range(sel[0], min(sel[1] + 1, g["cols"])):
                 x, y, _ = self.col_to_xy(cc, 0, lay)
-                c.create_rectangle(x, y, x + cw, y + ns * ch, fill=C["sel"], width=0)
+                c.create_rectangle(x, y, x + cw, y + cur_ns * ch, fill=C["sel"], width=0)
         if self.playing and 0 <= self.play_col() < g["cols"]:
             x, y, _ = self.col_to_xy(self.play_col(), 0, lay)
-            c.create_rectangle(x, y, x + cw, y + ns * ch, fill=C["play"], width=0)
+            c.create_rectangle(x, y, x + cw, y + cur_ns * ch, fill=C["play"], width=0)
 
         for k, b in enumerate(g["bars"]):
             row, bx = bar_pos[k]
-            y_top = TOP_PAD + row * row_h + ch
-            line_top = y_top + ch // 2
-            line_bot = y_top + (ns - 1) * ch + ch // 2
             wpx = (b["cols"] + 1) * cw
-
-            if self.opts["barNumbers"]:
-                c.create_text(bx + cw, y_top - ch // 2, text=str(k + 1),
-                              fill=C["barnum"], font=font, anchor=tk.W)
-            for s in range(ns):
-                y = y_top + s * ch + ch // 2
-                c.create_line(bx, y, bx + wpx, y, fill=C["line"])
-
-            self.draw_barline(c, bx, line_top, line_bot,
-                              k > 0 and bl[k - 1]["close"],
-                              bl[k - 1]["repeat"] if k > 0 else 0,
-                              bl[k]["open"], bl[k]["double"])
+            row_start = k == 0 or bar_pos[k - 1][0] != row
             row_end = k == len(g["bars"]) - 1 or bar_pos[k + 1][0] != row
-            if row_end:
-                self.draw_barline(c, bx + wpx, line_top, line_bot,
-                                  bl[k]["close"], bl[k]["repeat"], False, False)
+            for t, ns_t in blocks:
+                tr = song["tracks"][t]
+                y_top = TOP_PAD + row * sys_h + block_off[t] * ch
+                line_top = y_top + ch // 2
+                line_bot = y_top + (ns_t - 1) * ch + ch // 2
 
-            if k == 0 or bar_pos[k - 1][0] != row:
-                for s in range(ns):
-                    label = "D" if tr["isDrum"] else NOTE_NAMES[tr["tuning"][s] % 12]
-                    c.create_text(bx - 4, y_top + s * ch + ch // 2, text=label,
-                                  fill=C["text"], font=font, anchor=tk.E)
+                if self.opts["barNumbers"] and t == top_t:
+                    c.create_text(bx + cw, y_top - ch // 2, text=str(k + 1),
+                                  fill=C["barnum"], font=font, anchor=tk.W)
+                for s in range(ns_t):
+                    y = y_top + s * ch + ch // 2
+                    c.create_line(bx, y, bx + wpx, y, fill=C["line"])
 
-            for cc in range(b["start"], b["start"] + b["cols"]):
-                x = bx + cw + (cc - b["start"]) * cw
-                key = str(cc)
-                fx = tr["fx"].get(key)
-                alt = tr.get("alt")
-                if fx:
-                    c.create_text(x + cw // 2, y_top - ch // 2 + 3, text=fx_label(fx),
-                                  fill=C["fxMark"], font=font_s)
-                elif alt and cc < len(alt) and alt[cc] and \
-                        (cc == 0 or cc - 1 >= len(alt) or alt[cc - 1] != alt[cc]):
-                    c.create_text(x + cw // 2, y_top - ch // 2 + 3,
-                                  text="%d:%d" % tuple(alt[cc]),
-                                  fill="#006000", font=font_s)
-                elif tr["topText"].get(key):
-                    c.create_text(x + cw // 2, y_top - ch // 2 + 3,
-                                  text=tr["topText"][key], fill=C["text"], font=font_s)
-                if tr["botText"].get(key):
-                    c.create_text(x + cw // 2, y_top + ns * ch + 4,
-                                  text=tr["botText"][key], fill=C["text"], font=font_s)
-                sp = tr["spaces"][cc] if cc < len(tr["spaces"]) else None
-                if not sp:
-                    continue
-                in_sel = sel and sel[0] <= cc <= sel[1]
-                on_play = self.playing and cc == self.play_col()
-                for s in range(ns):
-                    cell = sp[s]
-                    if not cell:
+                self.draw_barline(c, bx, line_top, line_bot,
+                                  k > 0 and bl[k - 1]["close"],
+                                  bl[k - 1]["repeat"] if k > 0 else 0,
+                                  bl[k]["open"], bl[k]["double"])
+                if row_end:
+                    self.draw_barline(c, bx + wpx, line_top, line_bot,
+                                      bl[k]["close"], bl[k]["repeat"], False, False)
+
+                if row_start:
+                    for s in range(ns_t):
+                        label = "D" if tr["isDrum"] else NOTE_NAMES[tr["tuning"][s] % 12]
+                        c.create_text(bx - 4, y_top + s * ch + ch // 2, text=label,
+                                      fill=C["text"], font=font, anchor=tk.E)
+
+                is_cur = t == self.cur_track
+                for cc in range(b["start"], b["start"] + b["cols"]):
+                    x = bx + cw + (cc - b["start"]) * cw
+                    key = str(cc)
+                    fx = tr["fx"].get(key)
+                    alt = tr.get("alt")
+                    if fx:
+                        c.create_text(x + cw // 2, y_top - ch // 2 + 3, text=fx_label(fx),
+                                      fill=C["fxMark"], font=font_s)
+                    elif alt and cc < len(alt) and alt[cc] and \
+                            (cc == 0 or cc - 1 >= len(alt) or alt[cc - 1] != alt[cc]):
+                        c.create_text(x + cw // 2, y_top - ch // 2 + 3,
+                                      text="%d:%d" % tuple(alt[cc]),
+                                      fill="#006000", font=font_s)
+                    elif tr["topText"].get(key):
+                        c.create_text(x + cw // 2, y_top - ch // 2 + 3,
+                                      text=tr["topText"][key], fill=C["text"], font=font_s)
+                    if tr["botText"].get(key):
+                        c.create_text(x + cw // 2, y_top + ns_t * ch + 4,
+                                      text=tr["botText"][key], fill=C["text"], font=font_s)
+                    sp = tr["spaces"][cc] if cc < len(tr["spaces"]) else None
+                    if not sp:
                         continue
-                    y = y_top + s * ch
-                    if not on_play:
-                        c.create_rectangle(x, y + 1, x + cw, y + ch - 1,
-                                           fill=C["sel"] if in_sel else C["bg"], width=0)
-                    self.draw_cell(c, cell, x, y, C["text"])
+                    in_sel = is_cur and sel and sel[0] <= cc <= sel[1]
+                    on_play = is_cur and self.playing and cc == self.play_col()
+                    for s in range(ns_t):
+                        cell = sp[s]
+                        if not cell:
+                            continue
+                        y = y_top + s * ch
+                        if not on_play:
+                            c.create_rectangle(x, y + 1, x + cw, y + ch - 1,
+                                               fill=C["sel"] if in_sel else C["bg"], width=0)
+                        self.draw_cell(c, cell, x, y, C["text"])
 
         if not self.playing and (self.caret_on or not self.opts["caretBlink"]):
+            tr = self.track()
             x, y, _ = self.col_to_xy(self.col, self.str_, lay)
             c.create_rectangle(x, y + 1, x + cw, y + ch - 1, fill=C["cursor"], width=0)
             cell = get_cell(tr, self.col, self.str_)
@@ -334,7 +364,7 @@ class App:
                 c.create_text(x + cw // 2, y + ch // 2, text="-",
                               fill=C["cursorText"], font=font)
 
-        height = TOP_PAD * 2 + rows * row_h
+        height = TOP_PAD * 2 + rows * sys_h
         c.configure(scrollregion=(0, 0, self.canvas.winfo_width(), height))
         self.draw_ruler(lay)
         self.update_status()
@@ -347,7 +377,7 @@ class App:
             return
         r.delete("all")
         cw, _, _, _ = self.metrics()
-        g, bar_pos, _, _ = lay or self.layout()
+        g, bar_pos, *_ = lay or self.layout()
         w = max(r.winfo_width(), self.canvas.winfo_width())
         H = RULER_H
         r.create_line(0, H - 1, w, H - 1, fill="#ffffff")
@@ -590,6 +620,7 @@ class App:
         self.sel_anchor = None
         self.clamp_cursor()
         self.redraw()
+        self.ensure_visible()
 
     # ---------- input ----------
 
@@ -682,7 +713,8 @@ class App:
     def on_click(self, e):
         if self.playing:
             return
-        self.col, self.str_ = self.xy_to_col(e.x, self.canvas.canvasy(e.y))
+        self.col, self.str_, self.cur_track = self.xy_to_col(e.x, self.canvas.canvasy(e.y))
+        self.clamp_cursor()
         self.sel_anchor = self.col
         self._dragging = True
         self.flush_pending()
@@ -691,7 +723,8 @@ class App:
     def on_drag(self, e):
         if not getattr(self, "_dragging", False):
             return
-        self.col, self.str_ = self.xy_to_col(e.x, self.canvas.canvasy(e.y))
+        # extend selection horizontally within the active track
+        self.col, _st, _t = self.xy_to_col(e.x, self.canvas.canvasy(e.y))
         self.redraw()
 
     def on_release(self, _e):
@@ -701,7 +734,7 @@ class App:
         self.redraw()
 
     def on_dblclick(self, e):
-        col, _ = self.xy_to_col(e.x, self.canvas.canvasy(e.y))
+        col, _st, _t = self.xy_to_col(e.x, self.canvas.canvasy(e.y))
         g = self.geom()
         k = bar_of_col(g, col)
         self.sel_anchor = g["bars"][k]["start"]
@@ -1107,6 +1140,12 @@ class App:
     def fill_view_menu(self):
         vm = self.view_menu
         vm.delete(0, tk.END)
+        mode = self.opts.get("viewMode", "all")
+        for value, label in (("all", "All Tracks"), ("single", "Single Track")):
+            vm.add_radiobutton(label=label, value=value,
+                               variable=tk.StringVar(value=mode),
+                               command=lambda value=value: self.set_view_mode(value))
+        vm.add_separator()
         for key, label in (("barNumbers", "Bar Numbers"), ("caretBlink", "Cursor Blink")):
             vm.add_checkbutton(label=label, variable=tk.IntVar(value=1 if self.opts[key] else 0),
                                command=lambda key=key: self.toggle_opt(key))
@@ -1270,6 +1309,12 @@ class App:
         self.opts["fontSize"] = sz
         self.save_prefs()
         self.redraw()
+
+    def set_view_mode(self, mode):
+        self.opts["viewMode"] = mode
+        self.save_prefs()
+        self.redraw()
+        self.ensure_visible()
 
     # ---------- dialogs ----------
 
