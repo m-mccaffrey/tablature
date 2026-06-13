@@ -887,6 +887,7 @@ class App:
         fm.add_command(label="New", accelerator="Ctrl+N", command=self.new_song)
         fm.add_command(label="Open...", accelerator="Ctrl+O", command=self.open_song)
         fm.add_command(label="Save", accelerator="Ctrl+S", command=self.save_song)
+        fm.add_command(label="Save as TabIt (.tbt)...", command=self.save_tbt)
         fm.add_separator()
         fm.add_command(label="Export Text...", command=self.export_text)
         fm.add_command(label="Export MIDI...", command=self.export_midi)
@@ -1642,13 +1643,37 @@ class App:
         path = filedialog.asksaveasfilename(parent=self.root, title="Save",
             initialfile=base + ".tabit.json",
             defaultextension=".tabit.json",
-            filetypes=[("TabIt Web song", "*.tabit.json")])
+            filetypes=[("TabIt Web song", "*.tabit.json"),
+                       ("TabIt tablature", "*.tbt")])
         if not path:
             return
-        with open(path, "w") as f:
-            json.dump({"format": "tabit-web-2", "song": self.song}, f, indent=1)
+        try:
+            if path.lower().endswith(".tbt"):
+                from . import tbtwrite
+                with open(path, "wb") as f:
+                    f.write(tbtwrite.write(self.song))
+            else:
+                with open(path, "w") as f:
+                    json.dump({"format": "tabit-web-2", "song": self.song}, f, indent=1)
+        except Exception as exc:
+            messagebox.showerror("TabIt", "Could not save:\n%s" % exc)
+            return
         self.file_name = os.path.splitext(os.path.basename(path))[0].removesuffix(".tabit")
         self.update_title()
+
+    def save_tbt(self):
+        from . import tbtwrite
+        base = (self.file_name or self.song["title"] or "Untitled")
+        path = filedialog.asksaveasfilename(parent=self.root, title="Save as TabIt (.tbt)",
+            initialfile=base + ".tbt", defaultextension=".tbt",
+            filetypes=[("TabIt tablature", "*.tbt")])
+        if not path:
+            return
+        try:
+            with open(path, "wb") as f:
+                f.write(tbtwrite.write(self.song))
+        except Exception as exc:
+            messagebox.showerror("TabIt", "Could not save .tbt:\n%s" % exc)
 
     def export_text(self):
         path = filedialog.asksaveasfilename(parent=self.root, title="Export Text",

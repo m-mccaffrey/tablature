@@ -40,10 +40,12 @@ just the `docs/` folder.
 
 A demo song loads on startup — press **F5** to hear it.
 
-**Opens original TabIt `.tbt` files** (format versions 0x6f–0x72,
-TabIt ~1.55 through 2.03) via File → Open, including bar lines and
-repeats, note effects, track effect changes, alternate time regions,
-tunings, and song metadata.
+**Opens and saves original TabIt `.tbt` files** (reads format versions
+0x6f–0x72, TabIt ~1.55 through 2.03; writes 0x72) via File → Open and
+File → Save as TabIt — including bar lines and repeats, note effects,
+track effect changes, alternate time regions, tunings, text lines, and
+song metadata. Files round-trip between TabIt Web, TabIt Py, and the
+original program.
 
 | Key | Action |
 | --- | --- |
@@ -82,7 +84,7 @@ Feature highlights, all in the menus:
 
 - `docs/` — the web app (plain HTML/CSS/JS, no build step)
 - `python/` — the desktop app (Python/tkinter, stdlib-only core)
-- `docs/tbt.js` — reader for the original binary `.tbt` file format, based
+- `docs/tbt.js` — reader and writer for the original binary `.tbt` file format, based
   on the public reverse-engineering documentation
   ([bostick/tabit-file-format](https://github.com/bostick/tabit-file-format))
 - `tab.html` — Ghidra disassembly export of the original TabIt 2.03 executable
@@ -90,9 +92,8 @@ Feature highlights, all in the menus:
 
 ## Not done yet
 
-- Saving back to `.tbt` (songs save as JSON for now)
-- Editing alternate time regions (imported ones display and play correctly)
-- Editing the top/bottom text lines (imported text displays)
+- Chord-name / chord-diagram library
+- Real page-layout printing (text print preview exists)
 
 ## Disclaimer
 

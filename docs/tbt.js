@@ -61,6 +61,13 @@ const TBT = (() => {
     return new Uint8Array(await new Response(stream).arrayBuffer());
   }
 
+  async function deflate(u8) {
+    if (typeof CompressionStream === "undefined")
+      throw new Error("This browser cannot write .tbt files (no CompressionStream).");
+    const stream = new Blob([u8]).stream().pipeThrough(new CompressionStream("deflate"));
+    return new Uint8Array(await new Response(stream).arrayBuffer());
+  }
+
   class Reader {
     constructor(u8) { this.b = u8; this.p = 0; }
     u8()  { return this.b[this.p++]; }
@@ -306,7 +313,171 @@ const TBT = (() => {
     };
   }
 
-  return { parse, crc32, readDeltaList, Reader, OPEN_STRING_MIDI };
+  // ---- writer (version 0x72) ----
+
+  const FX_TO_CODE = {};
+  for (const code in NOTE_EFFECT_CODES) FX_TO_CODE[NOTE_EFFECT_CODES[code]] = Number(code);
+
+  class Builder {
+    constructor() { this.a = []; }
+    u8(v) { this.a.push(v & 0xff); return this; }
+    i8(v) { return this.u8(v < 0 ? v + 256 : v); }
+    u16(v) { return this.u8(v).u8(v >> 8); }
+    i16(v) { return this.u16(v < 0 ? v + 0x10000 : v); }
+    u32(v) { return this.u8(v).u8(v >> 8).u8(v >> 16).u8(v >>> 24); }
+    bytes(arr) { for (const b of arr) this.a.push(b & 0xff); return this; }
+    pascal2(s) {
+      const b = Array.from(String(s), c => c.charCodeAt(0) & 0xff).slice(0, 65535);
+      this.u16(b.length); return this.bytes(b);
+    }
+    out() { return new Uint8Array(this.a); }
+  }
+
+  function writeDeltaList(arr) {
+    const b = new Builder();
+    const pairs = [];
+    let nPairs = 0, i = 0;
+    while (i < arr.length) {
+      let j = i;
+      while (j < arr.length && arr[j] === arr[i]) j++;
+      let run = j - i;
+      const val = arr[i];
+      while (run > 0) {
+        const take = Math.min(run, 65535);
+        if (take < 256) { pairs.push(take, val); nPairs += 1; }
+        else { pairs.push(0, take & 0xff, (take >> 8) & 0xff, val); nPairs += 2; }
+        run -= take;
+      }
+      i = j;
+    }
+    b.u16(nPairs).bytes(pairs);
+    return b.out();
+  }
+
+  // geometry helpers mirroring the editor's track geometry
+  function trackCols(song, tr) {
+    const pt = song.barLines.reduce((s, b) => s + b.spaces, 0);
+    if (!tr.alt) return pt;
+    let cum = 0, cols = 0;
+    const ratio = i => tr.alt[i] ? tr.alt[i][1] / tr.alt[i][0] : 1;
+    while (cum < pt - 1e-6) { cum += ratio(cols); cols++; }
+    return Math.max(cols, 1);
+  }
+
+  async function write(song) {
+    const tracks = song.tracks, T = tracks.length;
+    const spaceCounts = tracks.map(tr => trackCols(song, tr));
+    const hasAlt = tracks.some(tr => tr.alt);
+
+    const m = new Builder();
+    for (const sc of spaceCounts) m.u32(sc);
+    m.bytes(tracks.map(tr => tr.tuning.length));
+    m.bytes(tracks.map(tr => (tr.instrument & 0x7f) | (tr.cutAnyString ? 0x80 : 0)));
+    m.bytes(tracks.map(tr => tr.instrument & 0x7f));            // mutedGuitar
+    m.bytes(tracks.map(tr => tr.volume & 0x7f));
+    m.bytes(tracks.map(tr => (tr.modulation || 0) & 0x7f));
+    for (const tr of tracks) m.i16(Math.max(-8192, Math.min(8191, tr.pitchBend || 0)));
+    for (let i = 0; i < T; i++) m.i8(0);                        // transpose (folded into tuning)
+    for (let i = 0; i < T; i++) m.u8(0);                        // midiBank
+    m.bytes(tracks.map(tr => (tr.reverb || 0) & 0x7f));
+    m.bytes(tracks.map(tr => (tr.chorus || 0) & 0x7f));
+    m.bytes(tracks.map(tr => tr.pan & 0x7f));
+    for (let i = 0; i < T; i++) m.u8(0x18);                     // highestNote
+    for (let i = 0; i < T; i++) m.u8(0);                        // displayMIDINoteNumbers
+    for (let i = 0; i < T; i++) m.u8(0xff);                     // midiChannel auto
+    m.bytes(tracks.map(tr => tr.topText && Object.keys(tr.topText).length ? 1 : 0));
+    m.bytes(tracks.map(tr => tr.botText && Object.keys(tr.botText).length ? 1 : 0));
+    for (const tr of tracks) {
+      const ns = tr.tuning.length;
+      for (let slot = 0; slot < 8; slot++) {
+        if (tr.isDrum || slot >= ns) { m.i8(0); continue; }
+        const disp = ns - 1 - slot;
+        m.i8(Math.max(-128, Math.min(127, tr.tuning[disp] - OPEN_STRING_MIDI[slot])));
+      }
+    }
+    m.bytes(tracks.map(tr => tr.isDrum ? 1 : 0));
+    m.pascal2(song.title || "").pascal2(song.artist || "").pascal2(song.album || "")
+     .pascal2(song.transcribedBy || "").pascal2(song.comments || "");
+
+    const body = new Builder();
+    let barRecords = 0;
+    for (const b of song.barLines) {
+      const flags = (b.double ? 0x01 : 0) | (b.open ? 0x02 : 0);
+      body.u32(b.spaces).u8(flags).u8(0); barRecords++;
+      if (b.close) { body.u32(0).u8(0x04).u8(Math.max(2, b.repeat || 2)); barRecords++; }
+    }
+    for (let t = 0; t < T; t++) {
+      const tr = tracks[t], sc = spaceCounts[t], ns = tr.tuning.length;
+      const data = new Uint8Array(20 * sc);
+      for (let c = 0; c < Math.min(sc, tr.spaces.length); c++) {
+        const sp = tr.spaces[c], base = c * 20;
+        if (sp) for (let disp = 0; disp < ns; disp++) {
+          const cell = sp[disp];
+          if (!cell) continue;
+          const slot = ns - 1 - disp;
+          if (cell.fx === "x") data[base + slot] = 0x11;
+          else if (cell.fx === "*") data[base + slot] = 0x12;
+          else {
+            data[base + slot] = 0x80 + Math.max(0, Math.min(99, cell.f));
+            if (cell.fx && FX_TO_CODE[cell.fx]) data[base + 8 + slot] = FX_TO_CODE[cell.fx];
+          }
+        }
+        const tc = tr.topText && tr.topText[c], bc = tr.botText && tr.botText[c];
+        if (tc) data[base + 17] = tc.charCodeAt(0) & 0x7f;
+        if (bc) data[base + 18] = bc.charCodeAt(0) & 0x7f;
+      }
+      body.bytes(writeDeltaList(data));
+    }
+    if (hasAlt) {
+      for (let t = 0; t < T; t++) {
+        const tr = tracks[t], sc = spaceCounts[t];
+        const data = new Uint8Array(2 * sc);
+        const alt = tr.alt || [];
+        for (let c = 0; c < Math.min(sc, alt.length); c++) {
+          if (alt[c]) { data[c * 2] = alt[c][1] & 0xff; data[c * 2 + 1] = alt[c][0] & 0xff; }
+        }
+        body.bytes(writeDeltaList(data));
+      }
+    }
+    for (let t = 0; t < T; t++) {
+      const fx = tracks[t].fx || {};
+      const cols = Object.keys(fx).map(Number).sort((a, b) => a - b);
+      const chunk = new Builder();
+      let prev = 0;
+      for (const col of cols) {
+        chunk.i16(col - prev).i16(fx[col].t).i16(0)
+             .i16(Math.max(-32768, Math.min(32767, fx[col].v)));
+        prev = col;
+      }
+      const cbytes = chunk.out();
+      body.u32(cbytes.length).bytes(cbytes);
+    }
+
+    const metaZ = await deflate(m.out());
+    const bodyZ = await deflate(body.out());
+
+    const header = new Uint8Array(64);
+    const hv = new DataView(header.buffer);
+    header[0] = 0x54; header[1] = 0x42; header[2] = 0x54; header[3] = 0x72;
+    header[4] = Math.min(255, song.tempo);
+    header[5] = T;
+    header[6] = 4; header[7] = 50; header[8] = 46; header[9] = 48; header[10] = 51; // "2.03"
+    header[0x0b] = 0x0f | (hasAlt ? 0x10 : 0);
+    hv.setUint16(0x28, barRecords, true);
+    hv.setUint16(0x2e, Math.min(65535, song.tempo), true);
+    hv.setUint32(0x30, metaZ.length, true);
+    hv.setUint32(0x34, crc32(bodyZ, bodyZ.length), true);
+    hv.setUint32(0x38, 64 + metaZ.length + bodyZ.length, true);
+    hv.setUint32(0x3c, crc32(header, 60), true);
+
+    const out = new Uint8Array(64 + metaZ.length + bodyZ.length);
+    out.set(header, 0);
+    out.set(metaZ, 64);
+    out.set(bodyZ, 64 + metaZ.length);
+    return out;
+  }
+
+  return { parse, write, crc32, readDeltaList, Reader, OPEN_STRING_MIDI };
 })();
 
 if (typeof module !== "undefined") module.exports = TBT;

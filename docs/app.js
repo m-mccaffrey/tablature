@@ -942,6 +942,7 @@ const MENUS = [
     ["Open...", "Ctrl+O", openSongDialog],
     ["Save", "Ctrl+S", saveSong],
     ["Save As...", "", saveSong],
+    ["Save as TabIt (.tbt)...", "", saveSongTbt],
     null,
     ["Export Text...", "", exportText],
     ["Export MIDI...", "", exportMidi],
@@ -2045,6 +2046,16 @@ function saveSong() {
   const base = (fileName || song.title || "Untitled").replace(/\.tabit\.json$|\.json$|\.tbt$/i, "");
   download(base + ".tabit.json",
     JSON.stringify({ format: "tabit-web-2", song }, stripPrivate, 1), "application/json");
+}
+
+async function saveSongTbt() {
+  const base = (fileName || song.title || "Untitled").replace(/\.tabit\.json$|\.json$|\.tbt$/i, "");
+  try {
+    const data = await TBT.write(song);
+    download(base + ".tbt", new Blob([data], { type: "application/octet-stream" }));
+  } catch (err) {
+    msgBox("TabIt", "Could not save .tbt:\n" + err.message);
+  }
 }
 
 function openSongDialog() {

@@ -68,6 +68,9 @@ Everything the web version does, in a native window:
   MIDI export
 - Multitrack with per-track mute, tuning presets (built-in ones recovered
   from the original binary, plus user-saved), metronome, tempo tap
+- Saves to the original **`.tbt`** binary format (File → Save as TabIt)
+  as well as `.tabit.json`; files written here open in the original
+  TabIt and round-trip through the reader
 - Export ASCII tab text, standard MIDI, and rendered audio (WAV/MP3)
 - MIDI playback by default (live `rtmidi` scheduling or the OS MIDI
   player), with repeats unrolled, tempo/volume/pan/instrument changes,
@@ -84,6 +87,7 @@ Preferences (colors, font size, options, user tunings) persist in
   from the original binary)
 - `tabit/model.py` — song model (dict-based, mirrors the JSON format)
 - `tabit/tbtfile.py` — original `.tbt` binary format reader
+- `tabit/tbtwrite.py` — original `.tbt` binary format writer (v0x72)
 - `tabit/performance.py` — repeat unrolling, tempo map, note events
 - `tabit/exporters.py` — ASCII text and MIDI export + the realtime MIDI
   event stream
