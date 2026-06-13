@@ -1008,21 +1008,27 @@ class App:
         m = tk.Menu(self.root)
         self.root.config(menu=m)
 
+        # ---- File ----
         fm = tk.Menu(m, tearoff=0)
         fm.add_command(label="New", accelerator="Ctrl+N", command=self.new_song)
         fm.add_command(label="Open...", accelerator="Ctrl+O", command=self.open_song)
         fm.add_command(label="Save", accelerator="Ctrl+S", command=self.save_song)
+        fm.add_command(label="Save As...", command=self.save_song)
         fm.add_command(label="Save as TabIt (.tbt)...", command=self.save_tbt)
         fm.add_separator()
-        fm.add_command(label="Export Text...", command=self.export_text)
-        fm.add_command(label="Export MIDI...", command=self.export_midi)
-        fm.add_command(label="Export Audio (WAV/MP3)...", command=self.export_audio)
+        fm.add_command(label="Print", command=self.print_song)
+        fm.add_command(label="Print Preview", command=self.print_preview)
         fm.add_separator()
-        fm.add_command(label="Song Properties...", command=self.song_props)
+        ex = tk.Menu(fm, tearoff=0)
+        ex.add_command(label="Text...", command=self.export_text)
+        ex.add_command(label="MIDI...", command=self.export_midi)
+        ex.add_command(label="Audio (WAV/MP3)...", command=self.export_audio)
+        fm.add_cascade(label="Export", menu=ex)
         fm.add_separator()
         fm.add_command(label="Exit", command=self.on_quit)
         m.add_cascade(label="File", menu=fm, underline=0)
 
+        # ---- Edit ----
         em = tk.Menu(m, tearoff=0)
         em.add_command(label="Undo", accelerator="Ctrl+Z", command=self.undo)
         em.add_command(label="Redo", accelerator="Ctrl+Y", command=self.redo)
@@ -1036,99 +1042,131 @@ class App:
         em.add_separator()
         em.add_command(label="Insert Space", accelerator="Ins", command=self.insert_space)
         em.add_command(label="Delete Space", accelerator="Ctrl+Del", command=self.delete_space)
+        em.add_separator()
+        em.add_command(label="Go to Bar...", command=self.goto_bar)
         m.add_cascade(label="Edit", menu=em, underline=0)
 
-        self.track_menu = tk.Menu(m, tearoff=0, postcommand=self.fill_track_menu)
-        m.add_cascade(label="Track", menu=self.track_menu, underline=0)
+        # ---- View ----
+        self.view_menu = tk.Menu(m, tearoff=0, postcommand=self.fill_view_menu)
+        m.add_cascade(label="View", menu=self.view_menu, underline=0)
 
-        bm = tk.Menu(m, tearoff=0)
-        bm.add_command(label="Add Bars...", command=self.add_bars)
-        bm.add_command(label="Insert Bar", command=self.insert_bar)
-        bm.add_command(label="Delete Bar", command=self.delete_bar)
-        bm.add_separator()
-        bm.add_command(label="Bar Line Change...", command=self.bar_line_change)
-        bm.add_separator()
-        bm.add_command(label="Alternate-Time Region...", command=self.alt_region_dialog)
-        bm.add_command(label="Remove Alternate-Time Region", command=self.remove_alt_region)
-        bm.add_separator()
-        bm.add_command(label="Go to Bar...", command=self.goto_bar)
-        m.add_cascade(label="Bar", menu=bm, underline=0)
+        # ---- Song ----
+        self.song_menu = tk.Menu(m, tearoff=0, postcommand=self.fill_song_menu)
+        m.add_cascade(label="Song", menu=self.song_menu, underline=0)
 
-        self.fx_menu = tk.Menu(m, tearoff=0, postcommand=self.fill_fx_menu)
-        m.add_cascade(label="Effects", menu=self.fx_menu, underline=0)
+        # ---- Create ----
+        self.create_menu = tk.Menu(m, tearoff=0, postcommand=self.fill_create_menu)
+        m.add_cascade(label="Create", menu=self.create_menu, underline=0)
 
-        self.player_menu = tk.Menu(m, tearoff=0, postcommand=self.fill_player_menu)
-        m.add_cascade(label="Player", menu=self.player_menu, underline=0)
+        # ---- Play ----
+        self.player_menu = tk.Menu(m, tearoff=0, postcommand=self.fill_play_menu)
+        m.add_cascade(label="Play", menu=self.player_menu, underline=0)
 
-        self.opt_menu = tk.Menu(m, tearoff=0, postcommand=self.fill_opt_menu)
-        m.add_cascade(label="Options", menu=self.opt_menu, underline=0)
+        # ---- Tools ----
+        self.tools_menu = tk.Menu(m, tearoff=0, postcommand=self.fill_tools_menu)
+        m.add_cascade(label="Tools", menu=self.tools_menu, underline=0)
 
+        # ---- Help ----
         hm = tk.Menu(m, tearoff=0)
         hm.add_command(label="Keyboard Shortcuts...", command=self.show_shortcuts)
         hm.add_separator()
         hm.add_command(label="About TabIt...", command=self.show_about)
         m.add_cascade(label="Help", menu=hm, underline=0)
 
-    def fill_track_menu(self):
-        tm = self.track_menu
-        tm.delete(0, tk.END)
-        tm.add_command(label="Add Track", command=self.add_track)
-        tm.add_command(label="Delete Track", command=self.delete_track,
+    def fill_view_menu(self):
+        vm = self.view_menu
+        vm.delete(0, tk.END)
+        for key, label in (("barNumbers", "Bar Numbers"), ("caretBlink", "Cursor Blink")):
+            vm.add_checkbutton(label=label, variable=tk.IntVar(value=1 if self.opts[key] else 0),
+                               command=lambda key=key: self.toggle_opt(key))
+        vm.add_separator()
+        for sz in ("Small", "Medium", "Large"):
+            vm.add_radiobutton(label="Font: " + sz,
+                               variable=tk.StringVar(value=self.opts["fontSize"]), value=sz,
+                               command=lambda sz=sz: self.set_font(sz))
+        vm.add_separator()
+        vm.add_command(label="Colors...", command=self.colors_dialog)
+
+    def fill_song_menu(self):
+        sm = self.song_menu
+        sm.delete(0, tk.END)
+        sm.add_command(label="Song Properties...", command=self.song_props)
+        sm.add_separator()
+        sm.add_command(label="Tempo...", command=self.tempo_dialog)
+        sm.add_command(label="Tempo Tap...", command=self.tempo_tap)
+        sm.add_separator()
+        sm.add_command(label="New Track", command=self.add_track)
+        sm.add_command(label="Delete Track", command=self.delete_track,
                        state=tk.NORMAL if len(self.song["tracks"]) > 1 else tk.DISABLED)
-        tm.add_separator()
+        sm.add_separator()
         for i, t in enumerate(self.song["tracks"]):
-            tm.add_radiobutton(label="%d: %s" % (i + 1, t["name"]),
+            sm.add_radiobutton(label="%d: %s" % (i + 1, t["name"]),
                                value=i, variable=tk.IntVar(value=self.cur_track),
                                command=lambda i=i: self.select_track(i))
-        tm.add_separator()
-        tm.add_command(label="Previous Track", accelerator="Ctrl+Up",
+        sm.add_separator()
+        sm.add_command(label="Previous Track", accelerator="Ctrl+Up",
                        command=lambda: self.switch_track(-1))
-        tm.add_command(label="Next Track", accelerator="Ctrl+Down",
+        sm.add_command(label="Next Track", accelerator="Ctrl+Down",
                        command=lambda: self.switch_track(1))
-        tm.add_separator()
-        tm.add_command(label="Save Preset Tuning...", command=self.save_tuning)
-        tm.add_command(label="Delete Preset Tuning...", command=self.delete_tuning)
-        tm.add_command(label="Reset Preset Tuning List", command=self.reset_tunings)
-        tm.add_separator()
-        tm.add_command(label="Transpose...", command=self.transpose_dialog)
-        tm.add_separator()
-        tm.add_command(label="Properties...", command=self.track_props)
+        sm.add_separator()
+        sm.add_command(label="Transpose...", command=self.transpose_dialog)
+        sm.add_command(label="Track Properties...", command=self.track_props)
 
     def select_track(self, i):
         self.cur_track = i
         self.clamp_cursor()
         self.redraw()
 
-    def fill_fx_menu(self):
-        fm = self.fx_menu
-        fm.delete(0, tk.END)
+    def fill_create_menu(self):
+        cm = self.create_menu
+        cm.delete(0, tk.END)
         tr = self.track()
         cell = get_cell(tr, self.col, self.str_)
+        fx = tr["fx"].get(str(self.col))
+        cm.add_command(label="Add Bars...", command=self.add_bars)
+        cm.add_command(label="Insert Bar", command=self.insert_bar)
+        cm.add_command(label="Delete Bar", command=self.delete_bar)
+        cm.add_separator()
+        cm.add_command(label="Bar Line Change...", command=self.bar_line_change)
+        cm.add_separator()
+        cm.add_command(label="Alternate-Time Region...", command=self.alt_region_dialog)
+        cm.add_command(label="Remove Alternate-Time Region", command=self.remove_alt_region)
+        cm.add_separator()
+
+        ne = tk.Menu(cm, tearoff=0)
         for ch, name in EFFECTS.items():
-            fm.add_checkbutton(label=name, accelerator=ch,
-                               onvalue=1, offvalue=0,
+            ne.add_checkbutton(label=name, accelerator=ch,
                                variable=tk.IntVar(value=1 if cell and cell["fx"] == ch else 0),
                                command=lambda ch=ch: self.type_effect(ch))
-        fm.add_separator()
-        fx = tr["fx"].get(str(self.col))
-        fm.add_checkbutton(label="Stroke Down", accelerator="d",
+        ne.add_separator()
+        ne.add_checkbutton(label="Dead Note", accelerator="x",
+                           variable=tk.IntVar(value=1 if cell and cell["fx"] == "x" else 0),
+                           command=lambda: self.type_effect("x"))
+        ne.add_checkbutton(label="Stop String", accelerator="*",
+                           variable=tk.IntVar(value=1 if cell and cell["fx"] == "*" else 0),
+                           command=lambda: self.type_effect("*"))
+        cm.add_cascade(label="Note Effect", menu=ne)
+
+        te = tk.Menu(cm, tearoff=0)
+        te.add_checkbutton(label="Stroke Down", accelerator="d",
                            variable=tk.IntVar(value=1 if fx and fx["t"] == TFX_STROKE_DOWN else 0),
                            command=lambda: self.set_track_fx(TFX_STROKE_DOWN, 0))
-        fm.add_checkbutton(label="Stroke Up", accelerator="u",
+        te.add_checkbutton(label="Stroke Up", accelerator="u",
                            variable=tk.IntVar(value=1 if fx and fx["t"] == TFX_STROKE_UP else 0),
                            command=lambda: self.set_track_fx(TFX_STROKE_UP, 0))
-        fm.add_separator()
+        te.add_separator()
         for t in (TFX_TEMPO, TFX_INSTRUMENT, TFX_VOLUME, TFX_PAN, TFX_CHORUS,
                   TFX_REVERB, TFX_PITCH_BEND):
-            fm.add_command(label=TFX_NAMES[t] + "...",
+            te.add_command(label=TFX_NAMES[t] + "...",
                            command=lambda t=t: self.track_fx_dialog(t))
-        fm.add_separator()
-        fm.add_command(label="Repeat Previous Track Effect", command=self.repeat_prev_track_fx)
-        fm.add_command(label="Remove Track Effect", command=self.remove_track_fx,
+        te.add_separator()
+        te.add_command(label="Repeat Previous Track Effect", command=self.repeat_prev_track_fx)
+        te.add_command(label="Remove Track Effect", command=self.remove_track_fx,
                        state=tk.NORMAL if fx else tk.DISABLED)
-        fm.add_command(label="Clear Track Effects", command=self.clear_track_fx)
+        te.add_command(label="Clear Track Effects", command=self.clear_track_fx)
+        cm.add_cascade(label="Track Effect", menu=te)
 
-    def fill_player_menu(self):
+    def fill_play_menu(self):
         pm = self.player_menu
         pm.delete(0, tk.END)
         pm.add_command(label="Play from Start", accelerator="F5", command=lambda: self.play_from(0))
@@ -1167,26 +1205,21 @@ class App:
             pm.add_checkbutton(label=label, variable=tk.IntVar(value=1 if self.opts[key] else 0),
                                command=lambda key=key: self.toggle_opt(key))
         pm.add_command(label="Metronome Settings...", command=self.metronome_dialog)
-        pm.add_separator()
-        pm.add_command(label="Tempo...", command=self.tempo_dialog)
-        pm.add_command(label="Tempo Tap...", command=self.tempo_tap)
 
-    def fill_opt_menu(self):
-        om = self.opt_menu
-        om.delete(0, tk.END)
-        for key, label in (("barNumbers", "Bar Numbers"), ("caretBlink", "Cursor Blink"),
-                           ("followPlayback", "Follow Playback"),
+    def fill_tools_menu(self):
+        tm = self.tools_menu
+        tm.delete(0, tk.END)
+        for key, label in (("followPlayback", "Follow Playback"),
                            ("rewindAfterStop", "Rewind After Stop"),
                            ("previewNotes", "Preview Notes While Typing")):
-            om.add_checkbutton(label=label, variable=tk.IntVar(value=1 if self.opts[key] else 0),
+            tm.add_checkbutton(label=label, variable=tk.IntVar(value=1 if self.opts[key] else 0),
                                command=lambda key=key: self.toggle_opt(key))
-        om.add_separator()
-        for sz in ("Small", "Medium", "Large"):
-            om.add_radiobutton(label="Font: " + sz,
-                               variable=tk.StringVar(value=self.opts["fontSize"]), value=sz,
-                               command=lambda sz=sz: self.set_font(sz))
-        om.add_separator()
-        om.add_command(label="Colors...", command=self.colors_dialog)
+        tm.add_separator()
+        tun = tk.Menu(tm, tearoff=0)
+        tun.add_command(label="Save Preset Tuning...", command=self.save_tuning)
+        tun.add_command(label="Delete Preset Tuning...", command=self.delete_tuning)
+        tun.add_command(label="Reset Preset Tuning List", command=self.reset_tunings)
+        tm.add_cascade(label="Tuning Presets", menu=tun)
 
     def toggle_opt(self, key):
         self.opts[key] = not self.opts[key]
