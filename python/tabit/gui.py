@@ -39,6 +39,7 @@ DEFAULT_COLORS = {
 
 LEFT_PAD = 40
 TOP_PAD = 10
+RULER_H = 16
 
 
 def fx_label(fx):
@@ -70,7 +71,7 @@ class App:
         self.player = audio.Player()
         self.midi_player = midiplayer.MidiPlayer()
         self.opts = {
-            "barNumbers": True, "caretBlink": True, "followPlayback": True,
+            "barNumbers": False, "caretBlink": True, "followPlayback": True,
             "rewindAfterStop": True, "metronome": False, "metroVolume": 80,
             "metroAccent": True, "loop": False, "fontSize": "Medium",
             "previewNotes": False, "playbackMode": "midi", "midiBackend": "auto",
@@ -85,11 +86,15 @@ class App:
 
         frame = tk.Frame(root, bd=2, relief=tk.SUNKEN, bg="#c0c0c0")
         frame.pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
-        self.canvas = tk.Canvas(frame, bg=self.colors["bg"], highlightthickness=0)
+        left = tk.Frame(frame, bg=self.colors["bg"])
+        left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.ruler = tk.Canvas(left, height=RULER_H, bg="#c0c0c0", highlightthickness=0)
+        self.ruler.pack(side=tk.TOP, fill=tk.X)
+        self.canvas = tk.Canvas(left, bg=self.colors["bg"], highlightthickness=0)
+        self.canvas.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
         vbar = tk.Scrollbar(frame, orient=tk.VERTICAL, command=self.canvas.yview)
         self.canvas.configure(yscrollcommand=vbar.set)
         vbar.pack(side=tk.RIGHT, fill=tk.Y)
-        self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
         status = tk.Frame(root, bg="#c0c0c0")
         status.pack(fill=tk.X)
@@ -194,7 +199,7 @@ class App:
         cw, ch, _, _ = self.metrics()
         g = self.geom()
         limit = max(300, self.canvas.winfo_width() - 24)
-        row_h = (self.n_strings() + (1 if self.opts["barNumbers"] else 0) + 2) * ch
+        row_h = (self.n_strings() + 3) * ch  # marker row + staff + bottom padding
         bar_pos = []
         x, row = LEFT_PAD, 0
         for b in g["bars"]:
@@ -212,14 +217,14 @@ class App:
         k = bar_of_col(g, min(col, g["cols"] - 1))
         row, bx = bar_pos[k]
         x = bx + cw + (col - g["bars"][k]["start"]) * cw
-        y = TOP_PAD + row * row_h + (ch if self.opts["barNumbers"] else 0) + st * ch
+        y = TOP_PAD + row * row_h + ch + st * ch
         return x, y, k
 
     def xy_to_col(self, px, py):
         cw, ch, _, _ = self.metrics()
         g, bar_pos, row_h, rows = self.layout()
         row = max(0, min(rows - 1, int((py - TOP_PAD) / row_h)))
-        st = int((py - TOP_PAD - row * row_h - (ch if self.opts["barNumbers"] else 0)) / ch)
+        st = int((py - TOP_PAD - row * row_h - ch) / ch)
         st = max(0, min(self.n_strings() - 1, st))
         best = None
         for k, (r, bx) in enumerate(bar_pos):
@@ -258,7 +263,7 @@ class App:
 
         for k, b in enumerate(g["bars"]):
             row, bx = bar_pos[k]
-            y_top = TOP_PAD + row * row_h + (ch if self.opts["barNumbers"] else 0)
+            y_top = TOP_PAD + row * row_h + ch
             line_top = y_top + ch // 2
             line_bot = y_top + (ns - 1) * ch + ch // 2
             wpx = (b["cols"] + 1) * cw
@@ -288,20 +293,19 @@ class App:
             for cc in range(b["start"], b["start"] + b["cols"]):
                 x = bx + cw + (cc - b["start"]) * cw
                 key = str(cc)
-                if self.opts["barNumbers"]:
-                    fx = tr["fx"].get(key)
-                    alt = tr.get("alt")
-                    if fx:
-                        c.create_text(x + cw // 2, y_top - ch // 2 + 3, text=fx_label(fx),
-                                      fill=C["fxMark"], font=font_s)
-                    elif alt and cc < len(alt) and alt[cc] and \
-                            (cc == 0 or cc - 1 >= len(alt) or alt[cc - 1] != alt[cc]):
-                        c.create_text(x + cw // 2, y_top - ch // 2 + 3,
-                                      text="%d:%d" % tuple(alt[cc]),
-                                      fill="#006000", font=font_s)
-                    elif tr["topText"].get(key):
-                        c.create_text(x + cw // 2, y_top - ch // 2 + 3,
-                                      text=tr["topText"][key], fill=C["text"], font=font_s)
+                fx = tr["fx"].get(key)
+                alt = tr.get("alt")
+                if fx:
+                    c.create_text(x + cw // 2, y_top - ch // 2 + 3, text=fx_label(fx),
+                                  fill=C["fxMark"], font=font_s)
+                elif alt and cc < len(alt) and alt[cc] and \
+                        (cc == 0 or cc - 1 >= len(alt) or alt[cc - 1] != alt[cc]):
+                    c.create_text(x + cw // 2, y_top - ch // 2 + 3,
+                                  text="%d:%d" % tuple(alt[cc]),
+                                  fill="#006000", font=font_s)
+                elif tr["topText"].get(key):
+                    c.create_text(x + cw // 2, y_top - ch // 2 + 3,
+                                  text=tr["topText"][key], fill=C["text"], font=font_s)
                 if tr["botText"].get(key):
                     c.create_text(x + cw // 2, y_top + ns * ch + 4,
                                   text=tr["botText"][key], fill=C["text"], font=font_s)
@@ -332,7 +336,31 @@ class App:
 
         height = TOP_PAD * 2 + rows * row_h
         c.configure(scrollregion=(0, 0, self.canvas.winfo_width(), height))
+        self.draw_ruler(lay)
         self.update_status()
+
+    def draw_ruler(self, lay=None):
+        """Fixed horizontal ruler above the staff: minor ticks per space,
+        taller ticks at bar lines, and a cursor-position marker."""
+        r = getattr(self, "ruler", None)
+        if r is None:
+            return
+        r.delete("all")
+        cw, _, _, _ = self.metrics()
+        g, bar_pos, _, _ = lay or self.layout()
+        w = max(r.winfo_width(), self.canvas.winfo_width())
+        H = RULER_H
+        r.create_line(0, H - 1, w, H - 1, fill="#ffffff")
+        r.create_line(0, 0, w, 0, fill="#808080")
+        x = LEFT_PAD + cw
+        while x < w:
+            r.create_line(x, H - 2, x, H - 6, fill="#707070")
+            x += cw
+        for k, (row, bx) in enumerate(bar_pos):
+            if row == 0:
+                r.create_line(bx + cw, H - 2, bx + cw, H - 11, fill="#303030")
+        cx, _, _ = self.col_to_xy(self.col, 0, lay)
+        r.create_polygon(cx - 3, 1, cx + 4, 1, cx, 7, fill="#000000")
 
     def draw_cell(self, c, cell, x, y, fg):
         cw, ch, font, font_s = self.metrics()
