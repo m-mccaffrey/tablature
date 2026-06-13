@@ -906,6 +906,8 @@ class App:
 
     # ---------- toolbar ----------
 
+    TOGGLE_KEYS = {"metro": "metronome", "rewind": "rewindAfterStop"}
+
     def build_toolbar(self):
         """Flat-button toolbar matched to TabIt 2.03's layout."""
         outer = tk.Frame(self.root, bg="#c0c0c0", bd=1, relief=tk.RAISED)
@@ -935,6 +937,7 @@ class App:
             ("stop", "Stop (F8)", self.stop, lambda: self.playing),
             None,
             ("metro", "Metronome", lambda: self._tb_toggle("metronome")),
+            ("rewind", "Rewind After Stop", lambda: self._tb_toggle("rewindAfterStop")),
         ]
         for item in spec:
             if item is None:
@@ -947,15 +950,15 @@ class App:
         self._sync_toolbar()
 
     def _tb_button(self, parent, name, tip, cmd, enabled):
-        toggle = name == "metro"
+        toggle_key = self.TOGGLE_KEYS.get(name)
         b = tk.Label(parent, image=icons.get(name), bd=1, relief=tk.FLAT,
                      bg="#c0c0c0", takefocus=0, padx=2, pady=2)
         b.pack(side=tk.LEFT, padx=1)
         self._tb_buttons[name] = {"w": b, "icon": name, "enabled": enabled,
-                                  "toggle": toggle}
+                                  "toggle": toggle_key}
 
         def active():
-            return toggle and bool(self.opts.get("metronome"))
+            return bool(toggle_key and self.opts.get(toggle_key))
 
         def usable():
             return enabled is None or enabled()
@@ -992,7 +995,7 @@ class App:
     def _sync_toolbar(self):
         for info in getattr(self, "_tb_buttons", {}).values():
             b, name = info["w"], info["icon"]
-            on = info["toggle"] and bool(self.opts.get("metronome"))
+            on = bool(info["toggle"] and self.opts.get(info["toggle"]))
             usable = info["enabled"] is None or info["enabled"]()
             b.config(image=icons.get(name, disabled=not usable),
                      relief=tk.SUNKEN if on else tk.FLAT)
