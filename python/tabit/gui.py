@@ -25,6 +25,7 @@ from .exporters import build_text, build_midi, realtime_events
 from .performance import build_performance
 from . import audio
 from . import midiplayer
+from . import miditransport
 from . import icons
 
 PREFS_PATH = os.path.expanduser("~/.config/tabit-py.json")
@@ -70,16 +71,25 @@ class App:
         self.play_start_col = 0
         self.player = audio.Player()
         self.midi_player = midiplayer.MidiPlayer()
+        self.tx = miditransport.TransportSender()
+        self.rx = miditransport.TransportReceiver(on_position=self._on_sync_pos,
+                                                  on_state=self._on_sync_state)
+        self._follow_col = None
+        self._follow_pps = None
+        self._follow_cols = None
         self.opts = {
             "barNumbers": False, "caretBlink": True, "followPlayback": True,
             "rewindAfterStop": True, "metronome": False, "metroVolume": 80,
             "metroAccent": True, "loop": False, "fontSize": "Medium",
             "previewNotes": False, "playbackMode": "midi", "midiBackend": "auto",
             "viewMode": "all",
+            "midiSyncOut": False, "midiSyncOutPort": "", "syncSendNotes": True,
+            "midiSyncIn": False, "midiSyncInPort": "",
         }
         self.colors = dict(DEFAULT_COLORS)
         self.user_tunings = {}
         self.load_prefs()
+        self.opts["midiSyncIn"] = False  # receiver isn't open until enabled this session
 
         root.configure(bg="#c0c0c0")
         self.build_menus()
@@ -285,6 +295,9 @@ class App:
         if self.playing and 0 <= self.play_col() < g["cols"]:
             x, y, _ = self.col_to_xy(self.play_col(), 0, lay)
             c.create_rectangle(x, y, x + cw, y + cur_ns * ch, fill=C["play"], width=0)
+        if not self.playing and self._follow_col is not None and 0 <= self._follow_col < g["cols"]:
+            x, y, _ = self.col_to_xy(self._follow_col, 0, lay)
+            c.create_rectangle(x, y, x + cw, y + cur_ns * ch, fill=C["play"], width=0)
 
         for k, b in enumerate(g["bars"]):
             row, bx = bar_pos[k]
@@ -342,7 +355,8 @@ class App:
                     if not sp:
                         continue
                     in_sel = is_cur and sel and sel[0] <= cc <= sel[1]
-                    on_play = is_cur and self.playing and cc == self.play_col()
+                    on_play = is_cur and ((self.playing and cc == self.play_col())
+                                          or (not self.playing and cc == self._follow_col))
                     for s in range(ns_t):
                         cell = sp[s]
                         if not cell:
@@ -808,6 +822,20 @@ class App:
             return
         t_off = perf["secAt"](start_step["pp"])
 
+        if self.opts.get("midiSyncOut"):
+            try:
+                opened = self.tx.start(
+                    realtime_events(self.song, perf), perf, t_off,
+                    from_start=(col == 0),
+                    port=self.opts.get("midiSyncOutPort") or None,
+                    send_clock=True, send_notes=self.opts.get("syncSendNotes", True))
+                self.st_main.config(text=" MIDI sync → %s" % opened)
+            except Exception as exc:
+                self.opts["midiSyncOut"] = False
+                messagebox.showerror("TabIt", "Could not open MIDI sync output:\n\n%s\n\n"
+                                     "Install python-rtmidi and a MIDI port "
+                                     "(e.g. a DAW input or loopMIDI/IAC bus)." % exc)
+
         if self.opts.get("playbackMode", "midi") == "midi":
             self._play_midi(perf, start_step, t_off)
             return
@@ -930,12 +958,86 @@ class App:
         self._play_token = getattr(self, "_play_token", 0) + 1
         self.player.stop()
         self.midi_player.stop()
+        self.tx.stop()
         if was and not silent:
             if self.opts["rewindAfterStop"]:
                 self.col = self.play_start_col
             self.clamp_cursor()
             self.redraw()
             self.ensure_visible()
+
+    # ---------- MIDI transport sync ----------
+
+    def toggle_sync_out(self):
+        self.opts["midiSyncOut"] = not self.opts["midiSyncOut"]
+        self.save_prefs()
+
+    def toggle_send_notes(self):
+        self.opts["syncSendNotes"] = not self.opts["syncSendNotes"]
+        self.save_prefs()
+
+    def set_sync_out_port(self, port):
+        self.opts["midiSyncOutPort"] = port
+        self.save_prefs()
+
+    def set_sync_in_port(self, port):
+        self.opts["midiSyncInPort"] = port
+        self.save_prefs()
+        if self.opts["midiSyncIn"]:
+            self.rx.close()
+            self.set_midi_sync_in(True)
+
+    def set_midi_sync_in(self, on):
+        if on:
+            try:
+                opened = self.rx.open(self.opts.get("midiSyncInPort") or None)
+            except Exception as exc:
+                self.opts["midiSyncIn"] = False
+                messagebox.showerror("TabIt", "Could not open MIDI sync input:\n\n%s\n\n"
+                                     "Install python-rtmidi and route your DAW's MIDI "
+                                     "clock to TabIt (a virtual 'TabIt Py' input is "
+                                     "created when no port is chosen)." % exc)
+                return
+            self.opts["midiSyncIn"] = True
+            self.st_main.config(text=" Following MIDI clock ← %s" % opened)
+        else:
+            self.opts["midiSyncIn"] = False
+            self.rx.close()
+            self._follow_col = None
+            self.redraw()
+        self.save_prefs()
+
+    def _on_sync_state(self, running):
+        self.root.after(0, lambda: self._sync_state_main(running))
+
+    def _sync_state_main(self, running):
+        if running:
+            perf = build_performance(self.song, self.cur_track,
+                                     self.opts["metronome"], self.opts["metroAccent"])
+            self._follow_pps = [s["pp"] for s in perf["steps"]]
+            self._follow_cols = [s["col"] for s in perf["steps"]]
+            self._follow_col = self._follow_cols[0] if self._follow_cols else 0
+        else:
+            self._follow_col = None
+        self.redraw()
+
+    def _on_sync_pos(self, pp):
+        self.root.after(0, lambda: self._sync_pos_main(pp))
+
+    def _sync_pos_main(self, pp):
+        if not self._follow_pps:
+            return
+        import bisect
+        i = max(0, bisect.bisect_right(self._follow_pps, pp + 1e-6) - 1)
+        col = self._follow_cols[i]
+        if col != self._follow_col:
+            self._follow_col = col
+            if self.opts["followPlayback"]:
+                save = self.col
+                self.col = col
+                self.ensure_visible()
+                self.col = save
+            self.redraw()
 
     # ---------- toolbar ----------
 
@@ -1275,6 +1377,47 @@ class App:
             pm.add_checkbutton(label=label, variable=tk.IntVar(value=1 if self.opts[key] else 0),
                                command=lambda key=key: self.toggle_opt(key))
         pm.add_command(label="Metronome Settings...", command=self.metronome_dialog)
+        pm.add_separator()
+        pm.add_cascade(label="MIDI Sync (DAW)", menu=self._build_sync_menu(pm))
+
+    def _build_sync_menu(self, parent):
+        sm = tk.Menu(parent, tearoff=0)
+        out_ports = miditransport.list_output_ports()
+        in_ports = miditransport.list_input_ports()
+        if out_ports is None and in_ports is None:
+            sm.add_command(label="Install python-rtmidi for MIDI sync", state=tk.DISABLED)
+            return sm
+        # ---- master (send) ----
+        sm.add_checkbutton(label="Send Clock + Transport (Master)",
+                           variable=tk.IntVar(value=1 if self.opts["midiSyncOut"] else 0),
+                           command=self.toggle_sync_out)
+        sm.add_checkbutton(label="Also Send Notes",
+                           variable=tk.IntVar(value=1 if self.opts["syncSendNotes"] else 0),
+                           command=self.toggle_send_notes)
+        op = tk.Menu(sm, tearoff=0)
+        cur_out = self.opts.get("midiSyncOutPort", "")
+        op.add_radiobutton(label="Virtual port (TabIt Py)", value="",
+                           variable=tk.StringVar(value=cur_out),
+                           command=lambda: self.set_sync_out_port(""))
+        for p in (out_ports or []):
+            op.add_radiobutton(label=p, value=p, variable=tk.StringVar(value=cur_out),
+                               command=lambda p=p: self.set_sync_out_port(p))
+        sm.add_cascade(label="Output Port", menu=op)
+        sm.add_separator()
+        # ---- slave (receive) ----
+        sm.add_checkbutton(label="Follow External Clock (Slave)",
+                           variable=tk.IntVar(value=1 if self.opts["midiSyncIn"] else 0),
+                           command=lambda: self.set_midi_sync_in(not self.opts["midiSyncIn"]))
+        ip = tk.Menu(sm, tearoff=0)
+        cur_in = self.opts.get("midiSyncInPort", "")
+        ip.add_radiobutton(label="Virtual port (TabIt Py)", value="",
+                           variable=tk.StringVar(value=cur_in),
+                           command=lambda: self.set_sync_in_port(""))
+        for p in (in_ports or []):
+            ip.add_radiobutton(label=p, value=p, variable=tk.StringVar(value=cur_in),
+                               command=lambda p=p: self.set_sync_in_port(p))
+        sm.add_cascade(label="Input Port", menu=ip)
+        return sm
 
     def fill_tools_menu(self):
         tm = self.tools_menu
@@ -2011,6 +2154,7 @@ class App:
 
     def on_quit(self):
         self.stop(silent=True)
+        self.rx.close()
         self.save_prefs()
         self.root.destroy()
 

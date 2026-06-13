@@ -41,6 +41,26 @@ otherwise).
 
 If no MIDI backend is found, the app explains exactly what to install.
 
+## MIDI transport sync (use TabIt as a sequencer)
+
+`Play → MIDI Sync (DAW)` turns TabIt into a clock source or follower so it
+can drive — or be driven by — a DAW over MIDI (needs `python-rtmidi`):
+
+- **Send Clock + Transport (Master)** — on Play, TabIt emits MIDI
+  Start/Continue, a Song Position Pointer, and 24-ppqn MIDI Clock that
+  tracks the tempo map, plus (optionally) the song's note events, out a
+  port. Point your DAW's external-sync input at the **TabIt Py** port and
+  it follows TabIt's tempo/transport and records the notes — program in
+  TabIt, sequence the DAW.
+- **Follow External Clock (Slave)** — TabIt opens a MIDI input and follows
+  incoming Start/Stop/Continue/Song-Position/Clock, moving the playhead in
+  lock with the DAW.
+
+Either side can use a **virtual "TabIt Py" port** (no hardware needed; on
+Windows use a loopback like loopMIDI, on macOS an IAC bus) or a named
+hardware/software port. Timing is exact: one TabIt space is a sixteenth
+note, so a space is 6 MIDI clocks / one Song-Position unit.
+
 Optional, recommended:
 
 - **numpy** — much faster, higher-quality synthesized rendering (stereo
