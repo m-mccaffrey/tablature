@@ -25,6 +25,7 @@ from .exporters import build_text, build_midi, realtime_events
 from .performance import build_performance
 from . import audio
 from . import midiplayer
+from . import icons
 
 PREFS_PATH = os.path.expanduser("~/.config/tabit-py.json")
 
@@ -80,6 +81,7 @@ class App:
 
         root.configure(bg="#c0c0c0")
         self.build_menus()
+        self.build_toolbar()
 
         frame = tk.Frame(root, bd=2, relief=tk.SUNKEN, bg="#c0c0c0")
         frame.pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
@@ -877,6 +879,120 @@ class App:
             self.redraw()
             self.ensure_visible()
 
+    # ---------- toolbar ----------
+
+    def build_toolbar(self):
+        """Classic Win9x flat-button toolbar under the menu bar."""
+        outer = tk.Frame(self.root, bg="#c0c0c0", bd=1, relief=tk.RAISED)
+        outer.pack(fill=tk.X)
+        bar = tk.Frame(outer, bg="#c0c0c0")
+        bar.pack(side=tk.LEFT, padx=1, pady=1)
+        self._tb_toggles = {}
+        spec = [
+            ("new", "New", self.new_song),
+            ("open", "Open", self.open_song),
+            ("save", "Save", self.save_song),
+            None,
+            ("cut", "Cut", lambda: self.copy_sel(True)),
+            ("copy", "Copy", lambda: self.copy_sel(False)),
+            ("paste", "Paste", self.paste),
+            None,
+            ("undo", "Undo", self.undo),
+            ("redo", "Redo", self.redo),
+            None,
+            ("play", "Play from Start (F5)", lambda: self.play_from(0)),
+            ("playcur", "Play from Cursor (F6)", lambda: self.play_from(self.col)),
+            ("stop", "Stop (F8)", self.stop),
+            None,
+            ("loop", "Loop", lambda: self._tb_toggle("loop")),
+            ("metro", "Metronome", lambda: self._tb_toggle("metronome")),
+        ]
+        for item in spec:
+            if item is None:
+                sep = tk.Frame(bar, width=2, bg="#808080", bd=0)
+                sep.pack(side=tk.LEFT, fill=tk.Y, padx=3, pady=2)
+                tk.Frame(bar, width=1, bg="#ffffff").pack(side=tk.LEFT, fill=tk.Y, pady=2)
+                continue
+            name, tip, cmd = item
+            self._tb_button(bar, name, tip, cmd)
+        self._sync_toolbar()
+
+    def _tb_button(self, parent, name, tip, cmd):
+        b = tk.Label(parent, image=icons.get(name), bd=1, relief=tk.FLAT,
+                     bg="#c0c0c0", takefocus=0, padx=2, pady=2)
+        b.pack(side=tk.LEFT, padx=1)
+        toggle = name in ("loop", "metronome")
+        if toggle:
+            self._tb_toggles[name] = b
+
+        def on_enter(_e):
+            if not (toggle and self._toggle_on(name)):
+                b.config(relief=tk.RAISED)
+
+        def on_leave(_e):
+            b.config(relief=tk.SUNKEN if toggle and self._toggle_on(name) else tk.FLAT)
+
+        def on_press(_e):
+            b.config(relief=tk.SUNKEN)
+
+        def on_release(_e):
+            cmd()
+            self.root.focus_set()
+            self._sync_toolbar()
+            b.config(relief=tk.RAISED if not (toggle and self._toggle_on(name)) else tk.SUNKEN)
+
+        b.bind("<Enter>", on_enter)
+        b.bind("<Leave>", on_leave)
+        b.bind("<ButtonPress-1>", on_press)
+        b.bind("<ButtonRelease-1>", on_release)
+        self._tip(b, tip)
+        return b
+
+    def _toggle_on(self, name):
+        key = "loop" if name == "loop" else "metronome"
+        return bool(self.opts.get(key))
+
+    def _tb_toggle(self, key):
+        self.opts[key] = not self.opts[key]
+        self.save_prefs()
+
+    def _sync_toolbar(self):
+        for name, b in getattr(self, "_tb_toggles", {}).items():
+            b.config(relief=tk.SUNKEN if self._toggle_on(name) else tk.FLAT)
+
+    def _tip(self, widget, text):
+        """Lightweight tooltip in the classic pale-yellow style."""
+        tip = {"win": None, "after": None}
+
+        def show():
+            tip["after"] = None
+            if tip["win"]:
+                return
+            x = widget.winfo_rootx() + 8
+            y = widget.winfo_rooty() + widget.winfo_height() + 2
+            w = tk.Toplevel(widget)
+            w.wm_overrideredirect(True)
+            w.wm_geometry("+%d+%d" % (x, y))
+            tk.Label(w, text=text, bg="#ffffe1", fg="#000000",
+                     bd=1, relief=tk.SOLID, font=("TkDefaultFont", 8),
+                     padx=3, pady=1).pack()
+            tip["win"] = w
+
+        def enter(_e):
+            tip["after"] = widget.after(500, show)
+
+        def leave(_e):
+            if tip["after"]:
+                widget.after_cancel(tip["after"])
+                tip["after"] = None
+            if tip["win"]:
+                tip["win"].destroy()
+                tip["win"] = None
+
+        widget.bind("<Enter>", enter, add="+")
+        widget.bind("<Leave>", leave, add="+")
+        widget.bind("<ButtonPress-1>", leave, add="+")
+
     # ---------- menus ----------
 
     def build_menus(self):
@@ -1066,6 +1182,7 @@ class App:
     def toggle_opt(self, key):
         self.opts[key] = not self.opts[key]
         self.save_prefs()
+        self._sync_toolbar()
         self.redraw()
 
     def set_playback_mode(self, mode):
