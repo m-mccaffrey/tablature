@@ -93,10 +93,9 @@ class App:
 
         status = tk.Frame(root, bg="#c0c0c0")
         status.pack(fill=tk.X)
-        self.st_track = self._panel(status, 18)
-        self.st_bar = self._panel(status, 10)
-        self.st_mode = self._panel(status, 24)
-        self.st_hint = self._panel(status, 0, expand=True)
+        self.st_track = self._panel(status, 12)
+        self.st_bar = self._panel(status, 9)
+        self.st_main = self._panel(status, 0, expand=True)
 
         root.bind("<Key>", self.on_key)
         self.canvas.bind("<Button-1>", self.on_click)
@@ -283,8 +282,6 @@ class App:
             if k == 0 or bar_pos[k - 1][0] != row:
                 for s in range(ns):
                     label = "D" if tr["isDrum"] else NOTE_NAMES[tr["tuning"][s] % 12]
-                    if s == 0 and not tr["isDrum"]:
-                        label = label.lower()
                     c.create_text(bx - 4, y_top + s * ch + ch // 2, text=label,
                                   fill=C["text"], font=font, anchor=tk.E)
 
@@ -378,20 +375,19 @@ class App:
     def update_status(self):
         tr = self.track()
         g = self.geom()
-        muted = "" if tr.get("played", True) else " [muted]"
-        self.st_track.config(text=" Track: %d (%s)%s" % (self.cur_track + 1, tr["name"], muted))
+        self.st_track.config(text=" Track: %d" % (self.cur_track + 1))
         self.st_bar.config(text=" Bar: %d" % (bar_of_col(g, self.col) + 1))
         sel = self.selection()
         if self.playing:
-            mode = "Playing..."
+            main = "Playing..."
         elif sel:
             n = sel[1] - sel[0] + 1
-            mode = "1 space is selected." if n == 1 else "%d spaces are selected." % n
+            main = "1 space is selected." if n == 1 else "%d spaces are selected." % n
         else:
-            mode = ""
-        self.st_mode.config(text=mode)
-        self.st_hint.config(text=" Frets: 0-9 | h p / \\ b ^ r ~ t s w ( < { | x dead, "
-                                 "* stop, u/d stroke | F5 play, F6 cursor, F8 stop")
+            title = (self.song.get("title") or "Untitled").strip()
+            artist = (self.song.get("artist") or "").strip()
+            main = "%s / %s" % (title, artist) if artist else title
+        self.st_main.config(text=" " + main)
         self._sync_toolbar()
 
     def update_title(self):
@@ -803,7 +799,7 @@ class App:
     def _render_and_play(self, make_wav, perf, t_off):
         """Render WAV off-thread (make_wav callable) then play via the
         audio output and start the playhead clock."""
-        self.st_mode.config(text="Rendering...")
+        self.st_main.config(text="Rendering...")
         self.root.update_idletasks()
         token = self._play_token = getattr(self, "_play_token", 0) + 1
 
@@ -812,7 +808,7 @@ class App:
                 wav = make_wav()
             except Exception as exc:
                 self.root.after(0, lambda exc=exc: (
-                    self.st_mode.config(text=""),
+                    self.st_main.config(text=""),
                     messagebox.showerror("TabIt", "Error during playback:\n\n%s" % exc)))
                 return
             self.root.after(0, lambda: self._start_playback(perf, t_off, wav, token))
@@ -826,7 +822,7 @@ class App:
         try:
             self.player.play(wav)
         except RuntimeError as exc:
-            self.st_mode.config(text="")
+            self.st_main.config(text="")
             messagebox.showerror("TabIt", str(exc))
             return
         self._start_clock(perf, t_off)
@@ -1836,7 +1832,7 @@ class App:
             return
         try:
             subprocess.run([cmd], input=build_text(self.song).encode("utf-8"), check=True)
-            self.st_mode.config(text="Sent to printer")
+            self.st_main.config(text="Sent to printer")
         except Exception as exc:
             messagebox.showerror("TabIt", "Printing failed:\n%s" % exc)
 
@@ -1875,7 +1871,7 @@ class App:
             messagebox.showerror("TabIt", "MP3 export needs ffmpeg installed; "
                                           "exporting WAV instead.")
             path = path[:-4] + ".wav"
-        self.st_mode.config(text="Rendering...")
+        self.st_main.config(text="Rendering...")
         self.root.update_idletasks()
 
         def render():
@@ -1896,7 +1892,7 @@ class App:
                 else:
                     with open(path, "wb") as f:
                         f.write(wav)
-                self.root.after(0, lambda: self.st_mode.config(
+                self.root.after(0, lambda: self.st_main.config(
                     text="Exported %s" % os.path.basename(path)))
             except Exception as exc:
                 self.root.after(0, lambda exc=exc: messagebox.showerror(
