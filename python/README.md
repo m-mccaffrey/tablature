@@ -15,20 +15,31 @@ python3 -m tabit
 
 ## Playback
 
-Like the original TabIt, playback is **MIDI** by default. Backends, in
-order of preference:
+Like the original TabIt, playback uses **MIDI** (General MIDI
+instruments) by default. The default backend renders the song to audio
+with **fluidsynth** + a GM soundfont and plays it through the same audio
+output the rest of the app uses — so if note preview is audible, playback
+is too. Install it with:
 
-1. `pip install python-rtmidi` — live MIDI output to the first synth
-   port found (a virtual port otherwise). Best timing, instant stop.
-2. Windows: the built-in winmm/MCI MIDI player — the same mechanism the
-   original TabIt used, no setup needed.
-3. A command-line MIDI player: `timidity`, `fluidsynth` (with a GM
-   soundfont), `wildmidi`, or `aplaymidi`.
+```
+sudo apt install fluidsynth fluid-soundfont-gm      # Linux
+brew install fluid-synth                            # macOS (+ a .sf2)
+```
 
-Player → Playback also offers **Synthesized (Hi-Fi)** mode, which renders
-the song with the built-in Karplus-Strong string synth instead of MIDI —
-and File → **Export Audio (WAV/MP3)** saves that rendering to a file
-(MP3 needs `ffmpeg`; WAV otherwise).
+`Player → MIDI Output` lets you pick a specific backend; **Automatic**
+prefers fluidsynth, then falls back to:
+
+- the Windows winmm/MCI MIDI player (built in — what the original used)
+- a CLI player: `timidity`, `wildmidi`, or `aplaymidi`
+- `python-rtmidi` live output to a hardware/software MIDI port
+  (`pip install python-rtmidi`)
+
+`Player → Synthesized Playback (Hi-Fi)` switches to the built-in
+Karplus-Strong string synth instead of MIDI, and File → **Export Audio
+(WAV/MP3)** saves that rendering to a file (MP3 needs `ffmpeg`; WAV
+otherwise).
+
+If no MIDI backend is found, the app explains exactly what to install.
 
 Optional, recommended:
 
@@ -49,6 +60,9 @@ Everything the web version does, in a native window:
 - Tab editing with the original's keys: digit frets, note effects
   (`h p / \ b ^ r ~ t s w ( < {`), dead/stop notes, strokes
 - Variable bars, double bar lines, open/close repeats with play counts
+- Alternate-time regions (triplets etc.) — create over a selection, play
+  and render with the right timing
+- Per-track transpose
 - Track effect changes (tempo, instrument, volume, pan, chorus, reverb,
   pitch bend) with a real tempo map; repeats unrolled in playback and
   MIDI export

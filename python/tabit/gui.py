@@ -72,7 +72,7 @@ class App:
             "barNumbers": True, "caretBlink": True, "followPlayback": True,
             "rewindAfterStop": True, "metronome": False, "metroVolume": 80,
             "metroAccent": True, "loop": False, "fontSize": "Medium",
-            "previewNotes": False, "playbackMode": "midi",
+            "previewNotes": False, "playbackMode": "midi", "midiBackend": "auto",
         }
         self.colors = dict(DEFAULT_COLORS)
         self.user_tunings = {}
@@ -749,43 +749,81 @@ class App:
         t_off = perf["secAt"](start_step["pp"])
 
         if self.opts.get("playbackMode", "midi") == "midi":
-            backend = midiplayer.detect_backend()
-            if backend is None:
-                messagebox.showerror("TabIt", midiplayer.backend_help())
-                return
-            try:
-                if backend == "rtmidi":
-                    self.midi_player.play_events(realtime_events(self.song, perf), t_off)
-                else:
-                    start_pp = start_step["pp"]
-                    data = build_midi(self.song, perf, shift_pp=start_pp,
-                                      respect_mute=True)
-                    self.midi_player.play_file(data, backend)
-            except Exception as exc:
-                messagebox.showerror("TabIt", "Error during playback:\n\n%s" % exc)
-                return
-            self._start_clock(perf, t_off)
+            self._play_midi(perf, start_step, t_off)
             return
 
         # synthesized (hi-fi) mode
+        self._render_and_play(
+            lambda: audio.render_performance(perf, self.song, t_off)[0],
+            perf, t_off)
+
+    def _resolve_midi_backend(self):
+        pref = self.opts.get("midiBackend", "auto")
+        if pref != "auto":
+            if pref in [b for b, _ in midiplayer.available_backends()]:
+                return pref
+        return midiplayer.choose_backend()
+
+    def _play_midi(self, perf, start_step, t_off):
+        backend = self._resolve_midi_backend()
+        if backend is None:
+            messagebox.showerror("TabIt", midiplayer.backend_help())
+            return
+        start_pp = start_step["pp"]
+
+        if backend == "fluidsynth-render":
+            # Render the song to General MIDI audio and play it through the
+            # same output as note preview, so playback is audible whenever
+            # preview is.
+            def make_wav():
+                data = build_midi(self.song, perf, shift_pp=start_pp,
+                                  respect_mute=True)
+                wav = midiplayer.render_midi_to_wav(data)
+                if wav is None:
+                    raise RuntimeError("fluidsynth could not render the song.")
+                return wav
+            self._render_and_play(make_wav, perf, t_off)
+            return
+
+        try:
+            if backend == "rtmidi":
+                self.midi_player.play_events(realtime_events(self.song, perf), t_off)
+            else:
+                data = build_midi(self.song, perf, shift_pp=start_pp,
+                                  respect_mute=True)
+                self.midi_player.play_file(data, backend)
+        except Exception as exc:
+            messagebox.showerror("TabIt", "Error during playback:\n\n%s" % exc)
+            return
+        self._start_clock(perf, t_off)
+
+    def _render_and_play(self, make_wav, perf, t_off):
+        """Render WAV off-thread (make_wav callable) then play via the
+        audio output and start the playhead clock."""
         self.st_mode.config(text="Rendering...")
         self.root.update_idletasks()
+        token = self._play_token = getattr(self, "_play_token", 0) + 1
 
-        def render():
+        def worker():
             try:
-                wav, _dur = audio.render_performance(perf, self.song, t_off)
-            except Exception as exc:  # pragma: no cover
-                self.root.after(0, lambda: messagebox.showerror(
-                    "TabIt", "Error during playback:\n\n%s" % exc))
+                wav = make_wav()
+            except Exception as exc:
+                self.root.after(0, lambda exc=exc: (
+                    self.st_mode.config(text=""),
+                    messagebox.showerror("TabIt", "Error during playback:\n\n%s" % exc)))
                 return
-            self.root.after(0, lambda: self._start_playback(perf, t_off, wav))
+            self.root.after(0, lambda: self._start_playback(perf, t_off, wav, token))
 
-        threading.Thread(target=render, daemon=True).start()
+        threading.Thread(target=worker, daemon=True).start()
 
-    def _start_playback(self, perf, t_off, wav):
+    def _start_playback(self, perf, t_off, wav, token=None):
+        # a newer play request (or a stop) supersedes a stale render
+        if token is not None and token != getattr(self, "_play_token", token):
+            return
         try:
             self.player.play(wav)
         except RuntimeError as exc:
+            self.st_mode.config(text="")
             messagebox.showerror("TabIt", str(exc))
             return
         self._start_clock(perf, t_off)
@@ -829,6 +867,7 @@ class App:
     def stop(self, silent=False):
         was = self.playing
         self.playing = False
+        self._play_token = getattr(self, "_play_token", 0) + 1
         self.player.stop()
         self.midi_player.stop()
         if was and not silent:
@@ -883,6 +922,9 @@ class App:
         bm.add_separator()
         bm.add_command(label="Bar Line Change...", command=self.bar_line_change)
         bm.add_separator()
+        bm.add_command(label="Alternate-Time Region...", command=self.alt_region_dialog)
+        bm.add_command(label="Remove Alternate-Time Region", command=self.remove_alt_region)
+        bm.add_separator()
         bm.add_command(label="Go to Bar...", command=self.goto_bar)
         m.add_cascade(label="Bar", menu=bm, underline=0)
 
@@ -921,6 +963,8 @@ class App:
         tm.add_command(label="Save Preset Tuning...", command=self.save_tuning)
         tm.add_command(label="Delete Preset Tuning...", command=self.delete_tuning)
         tm.add_command(label="Reset Preset Tuning List", command=self.reset_tunings)
+        tm.add_separator()
+        tm.add_command(label="Transpose...", command=self.transpose_dialog)
         tm.add_separator()
         tm.add_command(label="Properties...", command=self.track_props)
 
@@ -975,6 +1019,23 @@ class App:
             pm.add_radiobutton(label=label, value=value,
                                variable=tk.StringVar(value=mode),
                                command=lambda value=value: self.set_playback_mode(value))
+        # MIDI output device submenu
+        out_menu = tk.Menu(pm, tearoff=0)
+        cur = self.opts.get("midiBackend", "auto")
+        backends = midiplayer.available_backends()
+        auto = midiplayer.choose_backend()
+        auto_label = dict(backends + [("mci", "Windows MIDI (MCI)")]).get(auto, "none")
+        out_menu.add_radiobutton(label="Automatic (%s)" % auto_label, value="auto",
+                                 variable=tk.StringVar(value=cur),
+                                 command=lambda: self.set_midi_backend("auto"))
+        if backends:
+            out_menu.add_separator()
+        for bid, label in backends:
+            out_menu.add_radiobutton(label=label, value=bid,
+                                     variable=tk.StringVar(value=cur),
+                                     command=lambda bid=bid: self.set_midi_backend(bid))
+        pm.add_cascade(label="MIDI Output", menu=out_menu,
+                       state=tk.NORMAL if mode == "midi" else tk.DISABLED)
         pm.add_separator()
         for key, label in (("loop", "Loop"), ("metronome", "Metronome")):
             pm.add_checkbutton(label=label, variable=tk.IntVar(value=1 if self.opts[key] else 0),
@@ -1008,6 +1069,10 @@ class App:
 
     def set_playback_mode(self, mode):
         self.opts["playbackMode"] = mode
+        self.save_prefs()
+
+    def set_midi_backend(self, backend):
+        self.opts["midiBackend"] = backend
         self.save_prefs()
 
     def set_font(self, sz):
@@ -1211,6 +1276,65 @@ class App:
         self.sel_anchor = None
         self.redraw()
         self.ensure_visible()
+
+    def alt_region_dialog(self):
+        sel = self.selection() or (self.col, self.col)
+        win = self._modal("Alternate-Time Region")
+        tk.Label(win, text="Play the selected %d space(s) as:" %
+                 (sel[1] - sel[0] + 1)).pack(anchor=tk.W, padx=12, pady=(10, 4))
+        row = tk.Frame(win)
+        row.pack(padx=12)
+        num = tk.IntVar(value=3)
+        den = tk.IntVar(value=2)
+        tk.Spinbox(row, from_=1, to=32, textvariable=num, width=4).pack(side=tk.LEFT)
+        tk.Label(row, text="notes in the time of").pack(side=tk.LEFT, padx=4)
+        tk.Spinbox(row, from_=1, to=32, textvariable=den, width=4).pack(side=tk.LEFT)
+        tk.Label(win, text="(e.g. 3 in the time of 2 = triplets)",
+                 fg="#606060").pack(anchor=tk.W, padx=12, pady=(4, 0))
+
+        def ok():
+            n, d = max(1, num.get()), max(1, den.get())
+            self.push_undo()
+            tr = self.track()
+            g = self.geom()
+            if not tr.get("alt"):
+                tr["alt"] = [None] * g["cols"]
+            while len(tr["alt"]) < g["cols"]:
+                tr["alt"].append(None)
+            for c in range(sel[0], sel[1] + 1):
+                tr["alt"][c] = [n, d]
+            self.sel_anchor = None
+            self.clamp_cursor()
+            self.redraw()
+        self._buttons(win, ok)
+
+    def remove_alt_region(self):
+        tr = self.track()
+        if not tr.get("alt"):
+            return
+        sel = self.selection() or (self.col, self.col)
+        self.push_undo()
+        for c in range(sel[0], min(sel[1] + 1, len(tr["alt"]))):
+            tr["alt"][c] = None
+        if not any(tr["alt"]):
+            tr["alt"] = None
+        self.sel_anchor = None
+        self.clamp_cursor()
+        self.redraw()
+
+    def transpose_dialog(self):
+        tr = self.track()
+        if tr["isDrum"]:
+            messagebox.showinfo("TabIt", "Drum tracks cannot be transposed.")
+            return
+        v = simpledialog.askinteger(
+            "Transpose", "Transpose this track by (semitones, -24 to +24):",
+            parent=self.root, initialvalue=0, minvalue=-24, maxvalue=24)
+        if not v:
+            return
+        self.push_undo()
+        tr["tuning"] = [m + v for m in tr["tuning"]]
+        self.redraw()
 
     def song_props(self):
         win = self._modal("Song Properties")

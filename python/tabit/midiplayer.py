@@ -1,14 +1,23 @@
-"""Real-time MIDI playback.
+"""MIDI playback.
 
-Backends, in order of preference:
+The original TabIt played through the Windows General MIDI synth. We aim
+for the same result on any platform, and — crucially — for playback that
+is audible whenever note preview is audible.
 
-1. ``rtmidi`` (pip install python-rtmidi) — events are scheduled live on
-   a MIDI output port (the first hardware/software synth port found, or
-   a virtual port). Accurate timing and instant stop.
-2. Windows: the winmm/MCI MIDI player built into the OS — the same
-   mechanism the original TabIt used.
-3. A command-line MIDI player: timidity, fluidsynth, wildmidi, or
-   aplaymidi, playing a temporary .mid file.
+Two families of backend:
+
+* **render** — the .mid is rendered to PCM with a General MIDI soundfont
+  (fluidsynth) and played through the same audio output the rest of the
+  app uses (``audio.Player``: paplay/aplay/pw-play/ffplay/afplay/
+  winsound). This is the default: if preview makes sound, so does this.
+* **live** — events go straight to a real-time MIDI destination:
+  ``python-rtmidi`` to a hardware/software synth port, the Windows
+  winmm/MCI sequencer (what the original used), or a CLI player
+  (timidity/fluidsynth/wildmidi/aplaymidi) driving its own audio.
+
+``choose_backend`` prefers the render path because it reuses the proven
+audio output; live ports are offered for users who want zero render
+latency or external gear.
 """
 
 import glob
@@ -21,56 +30,137 @@ import threading
 import time
 
 
-def _try_rtmidi():
+# ---- General MIDI soundfont discovery (cross platform) ----
+
+_SF_PATTERNS = [
+    "/usr/share/sounds/sf2/*.sf2",
+    "/usr/share/soundfonts/*.sf2",
+    "/usr/share/sounds/sf3/*.sf3",
+    "/usr/local/share/soundfonts/*.sf2",
+    "/opt/homebrew/share/soundfonts/*.sf2",
+    "/usr/local/share/fluidsynth/*.sf2",
+    # macOS
+    "/Library/Audio/Sounds/Banks/*.sf2",
+    os.path.expanduser("~/Library/Audio/Sounds/Banks/*.sf2"),
+    # Windows common
+    "C:/soundfonts/*.sf2",
+]
+
+
+def find_soundfont():
+    env = os.environ.get("TABIT_SOUNDFONT")
+    if env and os.path.exists(env):
+        return env
+    # prefer a "GM" / "FluidR3" font when several exist
+    candidates = []
+    for pat in _SF_PATTERNS:
+        candidates.extend(glob.glob(pat))
+    candidates = [c for c in candidates if os.path.isfile(c)]
+    if not candidates:
+        return None
+    candidates.sort(key=lambda p: (0 if "gm" in p.lower() or "fluidr3" in p.lower()
+                                   else 1, -os.path.getsize(p)))
+    return candidates[0]
+
+
+def have_fluidsynth():
+    return shutil.which("fluidsynth") is not None and find_soundfont() is not None
+
+
+def _try_rtmidi_ports():
     try:
-        import rtmidi  # noqa: F401
+        import rtmidi
     except ImportError:
         return None
     try:
         out = rtmidi.MidiOut()
         ports = out.get_ports()
         del out
-        return ("rtmidi", ports)
+        return ports
     except Exception:
         return None
 
 
-def _soundfont():
-    for pat in ("/usr/share/sounds/sf2/*.sf2", "/usr/share/soundfonts/*.sf2",
-                "/usr/local/share/soundfonts/*.sf2"):
-        hits = glob.glob(pat)
-        if hits:
-            return hits[0]
-    return None
+def choose_backend():
+    """Return the preferred backend id, or None.
 
-
-def detect_backend():
-    """Return a backend name or None."""
-    if _try_rtmidi():
-        return "rtmidi"
+    Order: fluidsynth render (reliable GM through the app's audio
+    output) > Windows MCI > CLI live players > rtmidi live port.
+    """
+    if have_fluidsynth():
+        return "fluidsynth-render"
     if sys.platform == "win32":
         return "mci"
-    if shutil.which("timidity"):
-        return "timidity"
-    if shutil.which("fluidsynth") and _soundfont():
-        return "fluidsynth"
-    if shutil.which("wildmidi"):
-        return "wildmidi"
-    if shutil.which("aplaymidi"):
-        return "aplaymidi"
+    for cmd, ok in (("timidity", True),
+                    ("wildmidi", True),
+                    ("aplaymidi", True)):
+        if shutil.which(cmd):
+            return cmd
+    if _try_rtmidi_ports() is not None:
+        return "rtmidi"
     return None
+
+
+def available_backends():
+    """All usable backends, for the Player menu (id, label)."""
+    out = []
+    if have_fluidsynth():
+        out.append(("fluidsynth-render", "Software GM (fluidsynth)"))
+    if _try_rtmidi_ports() is not None:
+        out.append(("rtmidi", "Live MIDI port (rtmidi)"))
+    if sys.platform == "win32":
+        out.append(("mci", "Windows MIDI (MCI)"))
+    for cmd in ("timidity", "wildmidi", "aplaymidi"):
+        if shutil.which(cmd):
+            out.append((cmd, cmd))
+    return out
 
 
 def backend_help():
     return ("No MIDI playback backend was found.\n\n"
-            "Install one of:\n"
-            "  pip install python-rtmidi   (best: live MIDI output)\n"
-            "  sudo apt install timidity   (or fluidsynth + a GM soundfont)\n\n"
-            "Or switch Player > Playback to Synthesized (Hi-Fi), which "
-            "needs no MIDI support.")
+            "For General MIDI sound, install a synth + soundfont:\n"
+            "  Linux:  sudo apt install fluidsynth fluid-soundfont-gm\n"
+            "  macOS:  brew install fluid-synth  (and a .sf2 soundfont)\n"
+            "  Windows: built-in MIDI is used automatically\n\n"
+            "Or install live MIDI output:  pip install python-rtmidi\n\n"
+            "You can also switch Player > Playback to Synthesized "
+            "(Hi-Fi), which needs no MIDI support.")
+
+
+def render_midi_to_wav(midi_bytes, gain=0.6, sample_rate=44100):
+    """Render a .mid (bytes) to WAV bytes with fluidsynth + a GM
+    soundfont. Returns WAV bytes, or None if fluidsynth/soundfont
+    are unavailable."""
+    sf = find_soundfont()
+    if not sf or not shutil.which("fluidsynth"):
+        return None
+    mid_fd, mid_path = tempfile.mkstemp(suffix=".mid", prefix="tabit-")
+    wav_fd, wav_path = tempfile.mkstemp(suffix=".wav", prefix="tabit-")
+    os.close(wav_fd)
+    try:
+        with os.fdopen(mid_fd, "wb") as f:
+            f.write(midi_bytes)
+        subprocess.run(
+            ["fluidsynth", "-ni", "-g", "%.2f" % gain,
+             "-r", str(sample_rate), "-F", wav_path, sf, mid_path],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+        with open(wav_path, "rb") as f:
+            return f.read()
+    except (subprocess.SubprocessError, OSError):
+        return None
+    finally:
+        for p in (mid_path, wav_path):
+            try:
+                os.unlink(p)
+            except OSError:
+                pass
 
 
 class MidiPlayer:
+    """Live MIDI backends (rtmidi / MCI / CLI players). The fluidsynth
+    *render* path is handled by the GUI via render_midi_to_wav + the
+    audio Player, not here."""
+
     def __init__(self):
         self.backend = None
         self._proc = None
@@ -82,15 +172,12 @@ class MidiPlayer:
     # ---- rtmidi live scheduling ----
 
     def play_events(self, events, t_off=0.0):
-        """events: sorted (sec, msg_bytes). Plays from t_off; state
-        messages before t_off are sent immediately."""
         import rtmidi
         self.stop()
         self.backend = "rtmidi"
         out = rtmidi.MidiOut()
         ports = out.get_ports()
         if ports:
-            # prefer a synth port over MIDI-through
             idx = next((i for i, p in enumerate(ports)
                         if "through" not in p.lower()), 0)
             out.open_port(idx)
@@ -131,7 +218,7 @@ class MidiPlayer:
             except Exception:
                 pass
 
-    # ---- file-based backends ----
+    # ---- file-based live backends ----
 
     def play_file(self, midi_bytes, backend):
         self.stop()
@@ -146,10 +233,8 @@ class MidiPlayer:
             return
         if backend == "timidity":
             args = ["timidity", "-idqq", self._path]
-        elif backend == "fluidsynth":
-            args = ["fluidsynth", "-i", "-q", _soundfont(), self._path]
         elif backend == "wildmidi":
-            args = ["wildmidi", self._path]
+            args = ["wildmidi", "-o", "/dev/null"] if False else ["wildmidi", self._path]
         elif backend == "aplaymidi":
             port = os.environ.get("TABIT_MIDI_PORT") or self._first_alsa_port()
             args = ["aplaymidi", "-p", port or "14:0", self._path]
@@ -157,6 +242,12 @@ class MidiPlayer:
             raise RuntimeError("Unknown MIDI backend: %s" % backend)
         self._proc = subprocess.Popen(args, stdout=subprocess.DEVNULL,
                                       stderr=subprocess.DEVNULL)
+        # detect an immediate failure (missing config, dead driver)
+        time.sleep(0.15)
+        if self._proc.poll() is not None and self._proc.returncode != 0:
+            rc = self._proc.returncode
+            self._proc = None
+            raise RuntimeError("%s exited immediately (code %s)" % (backend, rc))
 
     @staticmethod
     def _first_alsa_port():
