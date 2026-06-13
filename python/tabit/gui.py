@@ -392,6 +392,7 @@ class App:
         self.st_mode.config(text=mode)
         self.st_hint.config(text=" Frets: 0-9 | h p / \\ b ^ r ~ t s w ( < { | x dead, "
                                  "* stop, u/d stroke | F5 play, F6 cursor, F8 stop")
+        self._sync_toolbar()
 
     def update_title(self):
         self.root.title((self.file_name or self.song["title"] or "Untitled") + " - TabIt")
@@ -882,64 +883,76 @@ class App:
     # ---------- toolbar ----------
 
     def build_toolbar(self):
-        """Classic Win9x flat-button toolbar under the menu bar."""
+        """Flat-button toolbar matched to TabIt 2.03's layout."""
         outer = tk.Frame(self.root, bg="#c0c0c0", bd=1, relief=tk.RAISED)
         outer.pack(fill=tk.X)
         bar = tk.Frame(outer, bg="#c0c0c0")
         bar.pack(side=tk.LEFT, padx=1, pady=1)
-        self._tb_toggles = {}
+        self._tb_buttons = {}
         spec = [
             ("new", "New", self.new_song),
             ("open", "Open", self.open_song),
             ("save", "Save", self.save_song),
             None,
-            ("cut", "Cut", lambda: self.copy_sel(True)),
-            ("copy", "Copy", lambda: self.copy_sel(False)),
-            ("paste", "Paste", self.paste),
+            ("songprops", "Song Properties", self.song_props),
             None,
-            ("undo", "Undo", self.undo),
-            ("redo", "Redo", self.redo),
+            ("print", "Print", self.print_song),
+            ("preview", "Print Preview", self.print_preview),
+            None,
+            ("cut", "Cut", lambda: self.copy_sel(True), lambda: self.selection() is not None),
+            ("copy", "Copy", lambda: self.copy_sel(False), lambda: self.selection() is not None),
+            ("paste", "Paste", self.paste, lambda: self.clipboard is not None),
+            ("undo", "Undo", self.undo, lambda: bool(self.undo_stack)),
+            None,
+            ("properties", "Track Properties", self.track_props),
             None,
             ("play", "Play from Start (F5)", lambda: self.play_from(0)),
             ("playcur", "Play from Cursor (F6)", lambda: self.play_from(self.col)),
-            ("stop", "Stop (F8)", self.stop),
+            ("stop", "Stop (F8)", self.stop, lambda: self.playing),
             None,
-            ("loop", "Loop", lambda: self._tb_toggle("loop")),
             ("metro", "Metronome", lambda: self._tb_toggle("metronome")),
         ]
         for item in spec:
             if item is None:
-                sep = tk.Frame(bar, width=2, bg="#808080", bd=0)
-                sep.pack(side=tk.LEFT, fill=tk.Y, padx=3, pady=2)
-                tk.Frame(bar, width=1, bg="#ffffff").pack(side=tk.LEFT, fill=tk.Y, pady=2)
+                tk.Frame(bar, width=2, bg="#808080").pack(side=tk.LEFT, fill=tk.Y, padx=(3, 0), pady=2)
+                tk.Frame(bar, width=1, bg="#ffffff").pack(side=tk.LEFT, fill=tk.Y, padx=(0, 3), pady=2)
                 continue
-            name, tip, cmd = item
-            self._tb_button(bar, name, tip, cmd)
+            name, tip, cmd = item[0], item[1], item[2]
+            enabled = item[3] if len(item) > 3 else None
+            self._tb_button(bar, name, tip, cmd, enabled)
         self._sync_toolbar()
 
-    def _tb_button(self, parent, name, tip, cmd):
+    def _tb_button(self, parent, name, tip, cmd, enabled):
+        toggle = name == "metro"
         b = tk.Label(parent, image=icons.get(name), bd=1, relief=tk.FLAT,
                      bg="#c0c0c0", takefocus=0, padx=2, pady=2)
         b.pack(side=tk.LEFT, padx=1)
-        toggle = name in ("loop", "metronome")
-        if toggle:
-            self._tb_toggles[name] = b
+        self._tb_buttons[name] = {"w": b, "icon": name, "enabled": enabled,
+                                  "toggle": toggle}
+
+        def active():
+            return toggle and bool(self.opts.get("metronome"))
+
+        def usable():
+            return enabled is None or enabled()
 
         def on_enter(_e):
-            if not (toggle and self._toggle_on(name)):
+            if usable() and not active():
                 b.config(relief=tk.RAISED)
 
         def on_leave(_e):
-            b.config(relief=tk.SUNKEN if toggle and self._toggle_on(name) else tk.FLAT)
+            b.config(relief=tk.SUNKEN if active() else tk.FLAT)
 
         def on_press(_e):
-            b.config(relief=tk.SUNKEN)
+            if usable():
+                b.config(relief=tk.SUNKEN)
 
         def on_release(_e):
+            if not usable():
+                return
             cmd()
             self.root.focus_set()
             self._sync_toolbar()
-            b.config(relief=tk.RAISED if not (toggle and self._toggle_on(name)) else tk.SUNKEN)
 
         b.bind("<Enter>", on_enter)
         b.bind("<Leave>", on_leave)
@@ -948,17 +961,17 @@ class App:
         self._tip(b, tip)
         return b
 
-    def _toggle_on(self, name):
-        key = "loop" if name == "loop" else "metronome"
-        return bool(self.opts.get(key))
-
     def _tb_toggle(self, key):
         self.opts[key] = not self.opts[key]
         self.save_prefs()
 
     def _sync_toolbar(self):
-        for name, b in getattr(self, "_tb_toggles", {}).items():
-            b.config(relief=tk.SUNKEN if self._toggle_on(name) else tk.FLAT)
+        for info in getattr(self, "_tb_buttons", {}).values():
+            b, name = info["w"], info["icon"]
+            on = info["toggle"] and bool(self.opts.get("metronome"))
+            usable = info["enabled"] is None or info["enabled"]()
+            b.config(image=icons.get(name, disabled=not usable),
+                     relief=tk.SUNKEN if on else tk.FLAT)
 
     def _tip(self, widget, text):
         """Lightweight tooltip in the classic pale-yellow style."""
@@ -1791,6 +1804,41 @@ class App:
                 f.write(tbtwrite.write(self.song))
         except Exception as exc:
             messagebox.showerror("TabIt", "Could not save .tbt:\n%s" % exc)
+
+    def print_preview(self):
+        win = tk.Toplevel(self.root)
+        win.title("Print Preview")
+        win.transient(self.root)
+        win.geometry("680x520")
+        txt = tk.Text(win, wrap="none", font=("Courier", 10), bg="#ffffff")
+        yb = tk.Scrollbar(win, orient=tk.VERTICAL, command=txt.yview)
+        xb = tk.Scrollbar(win, orient=tk.HORIZONTAL, command=txt.xview)
+        txt.configure(yscrollcommand=yb.set, xscrollcommand=xb.set)
+        txt.insert("1.0", build_text(self.song))
+        txt.config(state=tk.DISABLED)
+        bf = tk.Frame(win, bg="#c0c0c0")
+        bf.pack(side=tk.BOTTOM, fill=tk.X)
+        tk.Button(bf, text="Close", width=10, command=win.destroy).pack(side=tk.RIGHT, padx=6, pady=6)
+        tk.Button(bf, text="Print", width=10,
+                  command=lambda: self.print_song()).pack(side=tk.RIGHT, pady=6)
+        yb.pack(side=tk.RIGHT, fill=tk.Y)
+        xb.pack(side=tk.BOTTOM, fill=tk.X)
+        txt.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+    def print_song(self):
+        import shutil as _shutil
+        import subprocess
+        cmd = _shutil.which("lpr") or _shutil.which("lp")
+        if not cmd:
+            messagebox.showinfo("TabIt", "No printer command (lpr/lp) was found.\n\n"
+                                "Use Print Preview, or File → Export Text to save "
+                                "the tab to a file.")
+            return
+        try:
+            subprocess.run([cmd], input=build_text(self.song).encode("utf-8"), check=True)
+            self.st_mode.config(text="Sent to printer")
+        except Exception as exc:
+            messagebox.showerror("TabIt", "Printing failed:\n%s" % exc)
 
     def export_text(self):
         path = filedialog.asksaveasfilename(parent=self.root, title="Export Text",

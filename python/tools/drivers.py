@@ -17,3 +17,13 @@ def blank(app):
     app.cur_track = 0
     app.col = app.str_ = 0
     app.redraw()
+
+
+def selected(app):
+    """Active selection + clipboard + undo so edit buttons enable."""
+    app.opts["metronome"] = True
+    app.sel_anchor = 2
+    app.col = 6
+    app.clipboard = [None]
+    app.undo_stack.append("x")
+    app.redraw()
