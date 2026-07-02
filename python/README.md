@@ -54,7 +54,16 @@ can drive — or be driven by — a DAW over MIDI (needs `python-rtmidi`):
   TabIt, sequence the DAW.
 - **Follow External Clock (Slave)** — TabIt opens a MIDI input and follows
   incoming Start/Stop/Continue/Song-Position/Clock, moving the playhead in
-  lock with the DAW.
+  lock with the DAW **and sounding the song's notes as the playhead passes
+  them** (with **Sound Notes While Following**). Think of it like ADAT
+  sync: TabIt is a transport peer whose clock source is internal or
+  external, with its note signal routed wherever you want.
+
+Note routing is flexible: the slave's notes go out a **Notes Output Port**
+of your choice — loop the virtual **TabIt Py** port back into the DAW so
+each track plays through your software instruments (on their MIDI
+channels), or point it at a GM synth port to let TabIt make the sound
+itself. Clock in, clock out, and notes out are chosen independently.
 
 Either side can use a **virtual "TabIt Py" port** (no hardware needed; on
 Windows use a loopback like loopMIDI, on macOS an IAC bus) or a named

@@ -231,3 +231,20 @@ def realtime_events(song, perf):
             evs.append((sec_at(pp) + stroke, msg, seq))
     evs.sort(key=lambda e: (e[0], e[2]))
     return [(sec, msg) for sec, msg, _ in evs]
+
+
+def realtime_pp_events(song, perf):
+    """Channel events keyed by plain position (spaces) rather than seconds,
+    sorted, for clock-driven (slave) playback where timing comes from an
+    external transport instead of our tempo map."""
+    evs = []
+    for t in range(len(song["tracks"])):
+        if not song["tracks"][t].get("played", True):
+            continue
+        for pp, stroke, msg, seq in midi_track_events(song, perf, t):
+            if msg[0] == 0xFF:
+                continue
+            evs.append((pp, seq, msg))
+    evs.sort(key=lambda e: (e[0], e[1]))
+    return [(pp, msg) for pp, _seq, msg in evs]
+

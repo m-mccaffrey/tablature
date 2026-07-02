@@ -21,7 +21,7 @@ from .model import (blank_song, demo_song, make_bar, make_track, migrate,
                     get_cell, set_cell, track_geom, bar_of_col, normalize_bars,
                     track_insert_cols, track_remove_cols)
 from . import tbtfile
-from .exporters import build_text, build_midi, realtime_events
+from .exporters import build_text, build_midi, realtime_events, realtime_pp_events
 from .performance import build_performance
 from . import audio
 from . import midiplayer
@@ -77,6 +77,8 @@ class App:
         self._follow_col = None
         self._follow_pps = None
         self._follow_cols = None
+        self._notes_out = None
+        self._notes_out_name = None
         self.opts = {
             "barNumbers": False, "caretBlink": True, "followPlayback": True,
             "rewindAfterStop": True, "metronome": False, "metroVolume": 80,
@@ -85,6 +87,7 @@ class App:
             "viewMode": "all",
             "midiSyncOut": False, "midiSyncOutPort": "", "syncSendNotes": True,
             "midiSyncIn": False, "midiSyncInPort": "",
+            "syncSoundNotes": True, "notesOutPort": "",
         }
         self.colors = dict(DEFAULT_COLORS)
         self.user_tunings = {}
@@ -987,6 +990,52 @@ class App:
             self.rx.close()
             self.set_midi_sync_in(True)
 
+    def toggle_sync_sound_notes(self):
+        self.opts["syncSoundNotes"] = not self.opts["syncSoundNotes"]
+        self.save_prefs()
+        if self.opts["midiSyncIn"]:
+            self._open_notes_out()
+            self._refresh_slave_notes()
+
+    def set_notes_out_port(self, port):
+        self.opts["notesOutPort"] = port
+        self.save_prefs()
+        if self.opts["midiSyncIn"] and self.opts.get("syncSoundNotes"):
+            self._open_notes_out()
+            self._refresh_slave_notes()
+
+    def _open_notes_out(self):
+        """(Re)open the MIDI output that slave-mode notes are routed to."""
+        self._close_notes_out()
+        if not self.opts.get("syncSoundNotes"):
+            return
+        try:
+            self._notes_out, self._notes_out_name = miditransport.open_output(
+                self.opts.get("notesOutPort") or None)
+        except Exception as exc:
+            self._notes_out = None
+            messagebox.showerror("TabIt", "Could not open the notes output port:\n\n%s"
+                                 % exc)
+
+    def _close_notes_out(self):
+        if self._notes_out is not None:
+            try:
+                self._notes_out.close_port()
+            except Exception:
+                pass
+            self._notes_out = None
+            self._notes_out_name = None
+
+    def _refresh_slave_notes(self):
+        """Rebuild the pp-keyed note stream for the current song and route
+        it (or nothing) to the receiver."""
+        if self.opts.get("syncSoundNotes") and self._notes_out is not None:
+            perf = build_performance(self.song, self.cur_track,
+                                     self.opts["metronome"], self.opts["metroAccent"])
+            self.rx.set_output(realtime_pp_events(self.song, perf), self._notes_out)
+        else:
+            self.rx.set_output([], None)
+
     def set_midi_sync_in(self, on):
         if on:
             try:
@@ -999,10 +1048,15 @@ class App:
                                      "created when no port is chosen)." % exc)
                 return
             self.opts["midiSyncIn"] = True
-            self.st_main.config(text=" Following MIDI clock ← %s" % opened)
+            self._open_notes_out()
+            self._refresh_slave_notes()
+            dest = self._notes_out_name if self._notes_out else "playhead only"
+            self.st_main.config(text=" Following MIDI clock ← %s  ·  notes → %s"
+                                % (opened, dest))
         else:
             self.opts["midiSyncIn"] = False
             self.rx.close()
+            self._close_notes_out()
             self._follow_col = None
             self.redraw()
         self.save_prefs()
@@ -1017,6 +1071,7 @@ class App:
             self._follow_pps = [s["pp"] for s in perf["steps"]]
             self._follow_cols = [s["col"] for s in perf["steps"]]
             self._follow_col = self._follow_cols[0] if self._follow_cols else 0
+            self._refresh_slave_notes()  # keep note stream current with the song
         else:
             self._follow_col = None
         self.redraw()
@@ -1416,7 +1471,19 @@ class App:
         for p in (in_ports or []):
             ip.add_radiobutton(label=p, value=p, variable=tk.StringVar(value=cur_in),
                                command=lambda p=p: self.set_sync_in_port(p))
-        sm.add_cascade(label="Input Port", menu=ip)
+        sm.add_cascade(label="Clock Input Port", menu=ip)
+        sm.add_checkbutton(label="Sound Notes While Following",
+                           variable=tk.IntVar(value=1 if self.opts["syncSoundNotes"] else 0),
+                           command=self.toggle_sync_sound_notes)
+        np = tk.Menu(sm, tearoff=0)
+        cur_n = self.opts.get("notesOutPort", "")
+        np.add_radiobutton(label="Virtual port (TabIt Py) — loop to DAW", value="",
+                           variable=tk.StringVar(value=cur_n),
+                           command=lambda: self.set_notes_out_port(""))
+        for p in (out_ports or []):
+            np.add_radiobutton(label=p, value=p, variable=tk.StringVar(value=cur_n),
+                               command=lambda p=p: self.set_notes_out_port(p))
+        sm.add_cascade(label="Notes Output Port", menu=np)
         return sm
 
     def fill_tools_menu(self):
@@ -2155,6 +2222,7 @@ class App:
     def on_quit(self):
         self.stop(silent=True)
         self.rx.close()
+        self._close_notes_out()
         self.save_prefs()
         self.root.destroy()
 

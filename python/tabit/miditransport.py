@@ -89,6 +89,14 @@ def _open(rt_obj, port):
     return "TabIt Py (virtual)"
 
 
+def open_output(port=None):
+    """Open a MIDI output; returns (MidiOut, opened_name). Raises on failure."""
+    import rtmidi
+    out = rtmidi.MidiOut()
+    name = _open(out, port)
+    return out, name
+
+
 class TransportSender:
     """Streams transport + clock + notes to a MIDI output (master)."""
 
@@ -191,8 +199,10 @@ class TransportSender:
 
 class TransportReceiver:
     """Follows an external transport (slave). Calls on_position(space_pos)
-    and on_state(running) as messages arrive. The message handler is pure
-    enough to drive from tests without a real port."""
+    and on_state(running) as messages arrive, and — when a note output and
+    a pp-keyed event list are set — sounds the song's notes as the playhead
+    passes them, so TabIt plays in lock with the DAW. The message handler
+    is pure enough to drive from tests without a real port."""
 
     def __init__(self, on_position=None, on_state=None):
         self.on_position = on_position
@@ -200,6 +210,49 @@ class TransportReceiver:
         self.midiin = None
         self.running = False
         self.clocks = 0
+        self.note_out = None          # any object with .send_message(list)
+        self._events = []             # [(pp, msg)] sorted by pp
+        self._pps = []
+        self._emit_i = 0
+        import threading
+        self._lock = threading.Lock()
+
+    def set_output(self, pp_events, note_out):
+        """Route note events (list of (pp, msg)) to note_out as the
+        playhead crosses them. Pass note_out=None to follow silently."""
+        with self._lock:
+            self._events = pp_events or []
+            self._pps = [e[0] for e in self._events]
+            self.note_out = note_out
+            self._seek_locked(self.clocks / CLOCKS_PER_SPACE)
+
+    def _seek(self, pp):
+        with self._lock:
+            self._seek_locked(pp)
+
+    def _seek_locked(self, pp):
+        import bisect
+        self._emit_i = bisect.bisect_left(self._pps, pp)
+        self._panic()
+
+    def _panic(self):
+        if self.note_out:
+            for ch in range(16):
+                try:
+                    self.note_out.send_message([0xB0 | ch, 123, 0])
+                except Exception:
+                    pass
+
+    def _emit_through(self, pp):
+        with self._lock:
+            if not self.note_out:
+                return
+            while self._emit_i < len(self._events) and self._pps[self._emit_i] <= pp + 1e-9:
+                try:
+                    self.note_out.send_message(list(self._events[self._emit_i][1]))
+                except Exception:
+                    pass
+                self._emit_i += 1
 
     def handle(self, message):
         """message: iterable of status/data bytes (one MIDI message)."""
@@ -207,10 +260,13 @@ class TransportReceiver:
         if status == CLOCK:
             if self.running:
                 self.clocks += 1
+                pp = self.clocks / CLOCKS_PER_SPACE
+                self._emit_through(pp)
                 self._emit_pos()
         elif status == START:
             self.clocks = 0
             self.running = True
+            self._seek(0.0)
             self._emit_state()
             self._emit_pos()
         elif status == CONTINUE:
@@ -218,10 +274,12 @@ class TransportReceiver:
             self._emit_state()
         elif status == STOP:
             self.running = False
+            self._panic()
             self._emit_state()
         elif status == SPP and len(message) >= 3:
             value = (message[1] & 0x7F) | ((message[2] & 0x7F) << 7)
             self.clocks = value * CLOCKS_PER_SPACE
+            self._seek(self.clocks / CLOCKS_PER_SPACE)
             self._emit_pos()
 
     def _emit_pos(self):
@@ -243,6 +301,7 @@ class TransportReceiver:
         return opened
 
     def close(self):
+        self._panic()
         if self.midiin is not None:
             try:
                 self.midiin.close_port()
@@ -251,3 +310,4 @@ class TransportReceiver:
             self.midiin = None
         self.running = False
         self.clocks = 0
+
